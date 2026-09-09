@@ -1,0 +1,48 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Values.basic.component }}
+  labels:
+    app: {{ .Values.basic.component }}
+    version: v1
+spec:
+  replicas: {{ .Values.basic.replicaCount }}
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app: {{ .Values.basic.component }}
+      version: v1
+  template:
+    metadata:
+      annotations: {}
+      labels:
+        app: {{ .Values.basic.component }}
+        version: v1
+    spec:
+      serviceAccountName: sdp-runner
+      containers:
+        - name: container-1
+          env:
+            - name: HUB_GATEWAY_URL
+              value: {{ .Values.gateway.url }}
+            - name: CLUSTER_NAME
+              value: {{ .Values.cluster.name }}
+            - name: CLUSTER_AUTH_TOKEN
+              value: {{ .Values.cluster.authToken }}
+          image: {{ .Values.image.imageAddr }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          resources:
+            requests:
+              cpu: {{ .Values.resources.resources_cpu_requests }}
+              memory: {{ .Values.resources.resources_mem_requests }}
+            limits:
+              cpu: {{ .Values.resources.resources_cpu_limits }}
+              memory: {{ .Values.resources.resources_mem_limits }}
+      terminationGracePeriodSeconds: 30
+      dnsPolicy: ClusterFirst
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 25%
+      maxSurge: 25%
+  progressDeadlineSeconds: 600

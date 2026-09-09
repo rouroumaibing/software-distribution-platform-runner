@@ -1,0 +1,40 @@
+name: ci
+
+# L0 验证层 —— 纯检查、零产物、不触发发布（对齐 docs/ci-build-pipeline.md 的验证/发布分层理念）。
+# 触发: push main + 任意 PR；文档/设计类改动不排队。
+# 命令: go vet ./... -> go build ./... -> go test ./...（runner 当前无 *_test.go，test 保留骨架，
+#   未来补测试即自动纳入；runner 不依赖其他同仓，单 checkout。）
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ['docs/**', '**/*.md', 'assets/**']
+  pull_request:
+    paths-ignore: ['docs/**', '**/*.md', 'assets/**']
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: vet + build + test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Build
+        run: go build ./...
+
+      - name: Test
+        run: go test ./...

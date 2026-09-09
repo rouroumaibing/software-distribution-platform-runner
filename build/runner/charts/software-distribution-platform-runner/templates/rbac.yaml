@@ -1,0 +1,60 @@
+# Runner 的最小权限：管理三类 CR + Job 化执行 + Deployment 治理（Rollout）。
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sdp-runner
+  namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: sdp-runner
+rules:
+  # 自研 CR：PipelineRun / TaskRun / Rollout（含 status 子资源）。
+  # API group 必须与 CRD 一致：pipeline.sdp.io（config/crd/bases/*）。
+  - apiGroups: ["pipeline.sdp.io"]
+    resources: ["pipelineruns", "taskruns", "rollouts"]
+    verbs: ["*"]
+  # verbs "*" 不覆盖子资源，控制器回写 status 必须单独授权。
+  - apiGroups: ["pipeline.sdp.io"]
+    resources: ["pipelineruns/status", "taskruns/status", "rollouts/status"]
+    verbs: ["get", "patch", "update"]
+  # Job 化执行：创建/观察执行 Job 与其 Pod（取退出码、事件）。
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "pods/status"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "get", "list", "watch"]
+  # Rollout 控制工作负载。
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "patch", "update"]
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "watch"]
+  # ApplyHandler 需要发现/创建目标命名空间（缓存的 client Get 会等
+  # informer 同步，缺权限会导致 handler 永久阻塞、readLoop 卡死）。
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "watch", "create"]
+  # leader election（LEADER_ELECTION=true 时用，平时无害）。
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: sdp-runner
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: sdp-runner
+subjects:
+  - kind: ServiceAccount
+    name: sdp-runner
+    namespace: {{ .Release.Namespace }}

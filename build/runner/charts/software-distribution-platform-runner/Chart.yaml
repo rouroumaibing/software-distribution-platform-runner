@@ -1,0 +1,4 @@
+apiVersion: v2
+name: software-distribution-platform-runner
+description: software-distribution-platform-runner charts
+version: 0.0.1

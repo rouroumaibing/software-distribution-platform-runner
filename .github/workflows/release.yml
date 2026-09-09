@@ -1,0 +1,71 @@
+name: release
+
+# L1 发布编排层 —— 发布是显式动作：打 tag 不触发，GitHub Release 点 Publish 才构建；
+# workflow_dispatch 手动 dry-run（只产 workflow artifact，不碰任何 release）。
+# 产物 = build.sh 的 <component>-<version>.tar.gz（charts + images 交付包，docker load 即可用）。
+# 镜像暂不 push 远程 registry（docs R3: registry 地址确定后定值，届时在此补 push 段）。
+# runner 独立单仓，单 checkout。注意：hub 依赖本仓 api/v1alpha1（go.mod replace 本地路径），
+#   发布顺序应 runner 先发（打 tag 后 hub 侧改 require 即可撤 replace）。
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'dry-run 版本号（带 v 前缀，与 build.sh 约定一致，如 v0.0.1）'
+        required: true
+
+concurrency:
+  group: release-${{ github.event.release.tag_name || github.event.inputs.version }}
+  # 同一 release 的发布不互相取消（发布中断是危险动作）
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  # 版本解析：release 事件取 tag_name，dispatch 取手动输入；原样透传（SDP 版本号带 v，不 strip）
+  resolve-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - id: v
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then
+            echo "version=${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    name: build & pack (${{ needs.resolve-version.outputs.version }})
+    needs: resolve-version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      # build.sh 内含 GOOS=linux GOARCH=amd64 交叉编译 + docker build + save + pack
+      - name: Build & pack (build.sh -> output/*.tar.gz)
+        run: ./build/runner/build.sh ${{ needs.resolve-version.outputs.version }}
+
+      # release 模式：attach 到触发的该 release
+      - name: Attach to release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: output/software-distribution-platform-runner-${{ needs.resolve-version.outputs.version }}.tar.gz
+
+      # dry-run 模式：只存 workflow artifact
+      - name: Upload artifact (dry-run)
+        if: github.event_name != 'release'
+        uses: actions/upload-artifact@v4
+        with:
+          name: software-distribution-platform-runner-${{ needs.resolve-version.outputs.version }}
+          path: output/*.tar.gz
+          if-no-files-found: error

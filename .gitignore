@@ -1,0 +1,31 @@
+# ===== 构建产物（生成物，应清理） =====
+bin/
+*.test
+*.out
+coverage/
+*.err.txt
+*_err.txt
+
+# ===== controller-gen 生成文件：保留，不清理（go build / 打包 helm chart 需要）=====
+#   api/v1alpha1/zz_generated.deepcopy.go
+#   config/crd/bases/*.yaml   (pipelineruns / taskruns / rollouts)
+#   config/rbac/*.yaml        (待代码补 +kubebuilder:rbac 标记后生成)
+# 这些由 `make generate` / `make manifests` 生成，但属于打包输入，clean 不删；
+# clean-deep 也通过 --exclude 保护。建议最终 `git add` 纳入版本控制（kubebuilder 惯例）。
+
+# ===== 本地环境变量（含密钥，勿提交） =====
+.env
+.env.*
+!.env.example
+
+# ===== 本地服务运行时（pid/日志，勿提交） =====
+.run/
+
+# ===== 打包输出（build/runner/build.sh 生成） =====
+output/
+
+# ===== 系统 / 编辑器 =====
+.DS_Store
+.idea/
+.vscode/
+*.swp

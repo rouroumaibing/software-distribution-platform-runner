@@ -1,0 +1,575 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
+  name: pipelineruns.pipeline.sdp.io
+spec:
+  group: pipeline.sdp.io
+  names:
+    kind: PipelineRun
+    listKind: PipelineRunList
+    plural: pipelineruns
+    singular: pipelinerun
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .spec.tenantID
+      name: Tenant
+      type: string
+    - jsonPath: .spec.environmentID
+      name: Environment
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: PipelineRun is the Schema for the pipelineruns API.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              PipelineRunSpec defines the desired state of a PipelineRun.
+              A PipelineRun is created by the hub (via the runner's long-lived
+              connection) whenever a pipeline is triggered against a specific
+              environment on this cluster.
+            properties:
+              environmentID:
+                type: string
+              params:
+                items:
+                  description: |-
+                    Param is a simple key/value pipeline parameter, substituted into task
+                    command/args/env by the hub before the PipelineRun is dispatched.
+                  properties:
+                    name:
+                      type: string
+                    value:
+                      type: string
+                  required:
+                  - name
+                  - value
+                  type: object
+                type: array
+              pipelineRef:
+                description: |-
+                  PipelineRef optionally names a reusable pipeline definition owned by
+                  the hub, for display/audit purposes only — the runner never fetches
+                  it; Tasks below is always the full, already-resolved DAG.
+                type: string
+              projectID:
+                type: string
+              repo:
+                description: |-
+                  Repo is the default checkout source for every script-based task in
+                  this run; individual tasks may override via PipelineTaskSpec.Repo.
+                properties:
+                  path:
+                    description: |-
+                      Path is the subdirectory to treat as the working directory for
+                      monorepos where one component lives in a subfolder.
+                    type: string
+                  ref:
+                    description: Ref is a commit SHA (recommended), resolved by the
+                      hub before dispatch.
+                    type: string
+                  secretRef:
+                    description: |-
+                      SecretRef names a Secret (already present in TargetNamespace) holding
+                      git credentials, for private repos. The runner never receives raw
+                      credentials from the hub over the wire.
+                    type: string
+                  url:
+                    description: URL is the git remote, e.g. https://github.com/org/repo.git
+                    type: string
+                required:
+                - ref
+                - url
+                type: object
+              serviceAccountName:
+                type: string
+              targetNamespace:
+                description: |-
+                  TargetNamespace is the namespace the runner creates Jobs/TaskRuns in.
+                  Convention: {tenant}-{project}-{env}.
+                type: string
+              tasks:
+                description: Tasks is the fully resolved DAG definition to execute.
+                items:
+                  description: PipelineTaskSpec defines a single node in the pipeline
+                    DAG.
+                  properties:
+                    approvalConfig:
+                      description: ApprovalConfig is required when Type == Approval,
+                        ignored otherwise.
+                      properties:
+                        allowedApprovers:
+                          description: |-
+                            AllowedApprovers restricts who may approve by identity (email/user ID,
+                            resolved and enforced by the hub). Empty means anyone with project
+                            access may approve.
+                          items:
+                            type: string
+                          type: array
+                        requiredApprovals:
+                          description: RequiredApprovals is the number of distinct
+                            approvers needed to proceed.
+                          format: int32
+                          minimum: 1
+                          type: integer
+                        timeoutSeconds:
+                          description: |-
+                            TimeoutSeconds auto-fails the PipelineRun if no decision is made in
+                            time. 0 means wait indefinitely.
+                          format: int64
+                          type: integer
+                      required:
+                      - requiredApprovals
+                      type: object
+                    args:
+                      items:
+                        type: string
+                      type: array
+                    command:
+                      description: |-
+                        Command/Args remain available as an escape hatch for tasks that don't
+                        follow the script convention (e.g. calling a prebuilt tool image
+                        directly rather than a checked-out script).
+                      items:
+                        type: string
+                      type: array
+                    consumes:
+                      description: |-
+                        Consumes lists artifact keys (produced by any upstream task in this
+                        same PipelineRun) that the runner downloads into the working
+                        directory before ScriptPath runs.
+                      items:
+                        type: string
+                      type: array
+                    dependsOn:
+                      description: |-
+                        DependsOn lists upstream task names that must reach Succeeded before
+                        this task becomes runnable. Tasks with no DependsOn are entry nodes.
+                        Usually left empty and derived from Stage instead of set by hand.
+                      items:
+                        type: string
+                      type: array
+                    image:
+                      description: |-
+                        Image is the execution environment the script runs in (e.g. an image
+                        with the language toolchain, kubectl/helm for deploy scripts, etc).
+                      type: string
+                    name:
+                      description: Name must be unique within the PipelineRun; referenced
+                        by DependsOn.
+                      type: string
+                    produces:
+                      description: |-
+                        Produces lists artifact keys this task uploads to the artifact store
+                        after ScriptPath exits 0 (e.g. ["build-output"]). Keys are scoped to
+                        the PipelineRun automatically; the task only names them.
+                      items:
+                        type: string
+                      type: array
+                    repo:
+                      description: |-
+                        Repo overrides PipelineRunSpec.Repo for this task only; leave nil to
+                        inherit the run-level checkout. Approval tasks ignore this field.
+                      properties:
+                        path:
+                          description: |-
+                            Path is the subdirectory to treat as the working directory for
+                            monorepos where one component lives in a subfolder.
+                          type: string
+                        ref:
+                          description: Ref is a commit SHA (recommended), resolved
+                            by the hub before dispatch.
+                          type: string
+                        secretRef:
+                          description: |-
+                            SecretRef names a Secret (already present in TargetNamespace) holding
+                            git credentials, for private repos. The runner never receives raw
+                            credentials from the hub over the wire.
+                          type: string
+                        url:
+                          description: URL is the git remote, e.g. https://github.com/org/repo.git
+                          type: string
+                      required:
+                      - ref
+                      - url
+                      type: object
+                    retryPolicy:
+                      description: RetryPolicy defines retry behavior for a failed
+                        task.
+                      properties:
+                        backoff:
+                          description: Backoff between retries, e.g. "30s". Empty
+                            means retry immediately.
+                          type: string
+                        maxRetries:
+                          default: 0
+                          format: int32
+                          type: integer
+                      type: object
+                    rolloutSpec:
+                      description: |-
+                        RolloutSpec is required when Type == Deploy; the controller creates
+                        a Rollout resource from this template when the task becomes runnable.
+                      properties:
+                        autoRollback:
+                          default: true
+                          description: |-
+                            AutoRollback, when true, automatically reverts to 0% canary weight
+                            once HealthCheck.FailureThreshold consecutive checks fail.
+                          type: boolean
+                        canaryImage:
+                          type: string
+                        healthCheck:
+                          description: HealthCheckSpec defines how canary health is
+                            evaluated at each step.
+                          properties:
+                            failureThreshold:
+                              default: 3
+                              description: |-
+                                FailureThreshold is the number of consecutive failed checks before
+                                the controller triggers a rollback (if AutoRollback is true).
+                              format: int32
+                              type: integer
+                            httpPath:
+                              description: |-
+                                HTTPPath is used when Type == HTTPProbe, evaluated against the
+                                canary Pods directly.
+                              type: string
+                            intervalSeconds:
+                              default: 30
+                              description: IntervalSeconds between health evaluations.
+                              format: int64
+                              type: integer
+                            prometheusQueryExpr:
+                              description: |-
+                                PrometheusQueryExpr / PrometheusThreshold are used when
+                                Type == PrometheusQuery, e.g. checking canary error rate against a
+                                configured ceiling.
+                              type: string
+                            prometheusThreshold:
+                              type: string
+                            type:
+                              description: |-
+                                HealthCheckType selects how the rollout controller judges canary health
+                                at each step before advancing to the next one.
+                              enum:
+                              - PodReady
+                              - HTTPProbe
+                              - PrometheusQuery
+                              type: string
+                          required:
+                          - type
+                          type: object
+                        stableImage:
+                          type: string
+                        steps:
+                          description: Steps defines the full progressive delivery
+                            plan, evaluated in order.
+                          items:
+                            description: |-
+                              CanaryStep is one step of a progressive rollout: shift weight, then
+                              optionally pause before the controller evaluates health and proceeds.
+                            properties:
+                              pause:
+                                description: |-
+                                  Pause holds the rollout at the current weight. Omit both SetWeight
+                                  and Pause is invalid; a step must do at least one of the two.
+                                properties:
+                                  duration:
+                                    description: |-
+                                      Duration to pause for; if omitted, pause is indefinite until resumed
+                                      externally (e.g. by an operator approving progression, relayed via
+                                      the hub patching Rollout.Spec or a resume annotation).
+                                    type: string
+                                type: object
+                              setWeight:
+                                description: SetWeight is the percentage of traffic
+                                  (0-100) routed to the canary version.
+                                format: int32
+                                maximum: 100
+                                minimum: 0
+                                type: integer
+                            type: object
+                          minItems: 1
+                          type: array
+                        trafficRouting:
+                          description: |-
+                            TrafficRoutingSpec defines how traffic is actually split between
+                            stable and canary versions of the workload.
+                          properties:
+                            ingressRef:
+                              description: IngressRef is required when Type == IngressCanary.
+                              type: string
+                            type:
+                              description: TrafficRoutingType selects how canary traffic
+                                is split.
+                              enum:
+                              - DeploymentWeight
+                              - IngressCanary
+                              type: string
+                          required:
+                          - type
+                          type: object
+                        workloadRef:
+                          description: WorkloadRef is the name of the Deployment being
+                            progressively updated.
+                          type: string
+                      required:
+                      - canaryImage
+                      - healthCheck
+                      - stableImage
+                      - steps
+                      - trafficRouting
+                      - workloadRef
+                      type: object
+                    scriptArgs:
+                      description: |-
+                        ScriptArgs are passed positionally to the script, e.g. ["beta"] so a
+                        single run.sh can branch on target environment internally.
+                      items:
+                        type: string
+                      type: array
+                    scriptPath:
+                      description: |-
+                        ScriptPath is a path relative to the checked-out repo root (or
+                        Repo.Path for monorepos), e.g. "build.sh", "test.sh", "run.sh".
+                        The runner invokes it as `sh {ScriptPath} {ScriptArgs...}` from that
+                        working directory.
+                      type: string
+                    stage:
+                      description: |-
+                        Stage groups this task for UI display and sequencing. Tasks sharing a
+                        Stage run in parallel (no implicit dependency between them); the hub
+                        auto-generates DependsOn so every task in a later Stage depends on
+                        every task in the immediately preceding Stage.
+                      type: string
+                    timeoutSeconds:
+                      description: |-
+                        TimeoutSeconds bounds how long the corresponding TaskRun may run
+                        before being marked Failed. 0 means use the pipeline-level default.
+                      format: int64
+                      type: integer
+                    type:
+                      description: |-
+                        PipelineTaskType defines the category of a task within the DAG.
+                        The runner's PipelineRun controller branches its reconcile logic on this field:
+                        Build runs a command (or repo script) inside a tool image; Release applies a
+                        chart/manifest; Approval pauses the pipeline for an external decision.
+                      enum:
+                      - Build
+                      - Release
+                      - Approval
+                      type: string
+                  required:
+                  - name
+                  - type
+                  type: object
+                minItems: 1
+                type: array
+              tenantID:
+                description: |-
+                  TenantID / ProjectID / EnvironmentID carry multi-tenancy context down
+                  to the runner so it can apply namespace routing, quotas, and RBAC
+                  scoping without a round-trip back to the hub.
+                type: string
+              timeoutSeconds:
+                description: TimeoutSeconds bounds the whole pipeline run; 0 means
+                  no overall limit.
+                format: int64
+                type: integer
+              triggeredBy:
+                description: |-
+                  TriggeredBy records the hub-side user/system identity that started
+                  this run, for audit display via kubectl.
+                type: string
+            required:
+            - environmentID
+            - projectID
+            - targetNamespace
+            - tasks
+            - tenantID
+            type: object
+          status:
+            description: PipelineRunStatus defines the observed state of a PipelineRun.
+            properties:
+              completionTime:
+                format: date-time
+                type: string
+              conditions:
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              currentApproval:
+                description: |-
+                  CurrentApproval is set while Phase == WaitingApproval and cleared
+                  once the gate is resolved.
+                properties:
+                  approvedBy:
+                    description: |-
+                      ApprovedBy is appended to by the hub patching this status (relayed
+                      through the runner) as each required approver signs off.
+                    items:
+                      type: string
+                    type: array
+                  rejectedBy:
+                    description: |-
+                      RejectedBy is set the moment any allowed approver rejects; a single
+                      rejection fails the PipelineRun.
+                    type: string
+                  requestedAt:
+                    format: date-time
+                    type: string
+                  requiredCount:
+                    format: int32
+                    type: integer
+                  taskName:
+                    type: string
+                required:
+                - requestedAt
+                - requiredCount
+                - taskName
+                type: object
+              message:
+                description: Message carries a human-readable explanation for Failed/Cancelled
+                  runs.
+                type: string
+              observedGeneration:
+                description: |-
+                  ObservedGeneration lets the controller (and the hub) detect whether
+                  Status reflects the latest Spec.
+                format: int64
+                type: integer
+              phase:
+                description: PipelineRunPhase represents the overall lifecycle phase
+                  of a PipelineRun.
+                enum:
+                - Pending
+                - Running
+                - WaitingApproval
+                - Succeeded
+                - Failed
+                - Cancelled
+                type: string
+              startTime:
+                format: date-time
+                type: string
+              tasks:
+                description: |-
+                  Tasks mirrors the progress of every DAG node; index-aligned with
+                  Spec.Tasks by Name, not by array position.
+                items:
+                  description: |-
+                    TaskRunStatusSummary is an embedded, lightweight view of a TaskRun's
+                    progress, kept in sync by the PipelineRun controller so the whole DAG
+                    state is visible from a single `kubectl get pipelinerun -o yaml` without
+                    needing to list TaskRuns separately.
+                  properties:
+                    completionTime:
+                      format: date-time
+                      type: string
+                    message:
+                      type: string
+                    name:
+                      type: string
+                    phase:
+                      description: TaskRunPhase represents the lifecycle phase of
+                        a single TaskRun.
+                      type: string
+                    retryCount:
+                      format: int32
+                      type: integer
+                    startTime:
+                      format: date-time
+                      type: string
+                    taskRunRef:
+                      type: string
+                  required:
+                  - name
+                  - phase
+                  type: object
+                type: array
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

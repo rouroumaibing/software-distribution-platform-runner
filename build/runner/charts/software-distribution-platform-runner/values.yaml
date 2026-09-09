@@ -1,0 +1,24 @@
+basic:
+  # k8s 资源名统一用短名（镜像名才是全名）
+  component: runner
+  replicaCount: 1
+
+image:
+  imageAddr: localhost:5000/software-distribution-platform-runner:v0.0.1
+  pullPolicy: Always
+
+resources:
+  resources_cpu_requests: 100m
+  resources_cpu_limits: 500m
+  resources_mem_requests: 128Mi
+  resources_mem_limits: 512Mi
+
+# gateway 配置须与 hub chart 成对修改
+gateway:
+  url: ws://hub.sdp-system.svc:8080/gateway/ws
+  token: sdp-dev-token-2026
+
+# runner 需先在 hub 注册同名集群（POST /api/v1/clusters），token 与其一致
+cluster:
+  name: local-dev
+  authToken: sdp-dev-token-2026
