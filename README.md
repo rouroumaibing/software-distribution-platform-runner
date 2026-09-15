@@ -3,22 +3,22 @@
 
 ## 本地开发 / 管理命令
 
-管理命令入口为根 `Makefile`（`make <target>`，`make help` 可列出全部）；服务启停、清理的底层实现见 `hack/svc.sh`。打包/部署形态说明：
+管理命令入口为本仓 `Makefile`（`make <target>`，`make help` 可列出全部）；服务启停、清理的底层实现见 `hack/svc.sh`。**本仓自包含：所有命令只依赖仓内脚本（`hack/svc.sh`、`build/runner/build.sh`），不依赖仓库外的任何脚本。** 打包/部署形态说明：
 
-- `package` 产物（交付包）默认版本 `v0.0.1`，与工作区根 `deploy-local.sh` 的默认部署版本一致；
-- `start-deploy` / `stop-deploy` 复用工作区根 `deploy-local.sh` / `undeploy-local.sh`；
-- controller-gen 生成文件（`api/v1alpha1/zz_generated.deepcopy.go`、`config/crd/bases/*.yaml`、`config/rbac/*.yaml`）属构建/打包输入，**clean 不删、保留**。
+- **构建产物统一落在 `output/` 下**（`make build` 的 `output/bin/runner`、`make package` 的 `output/{charts,images}/` 与交付包），清理即一条 `rm -rf output`；
+- `package` 产物（交付包）默认版本 `v0.0.1`；
+- **起服务**：`make start-dev`（后台运行，pid 文件 + 进程组管理）→ `make stop-dev`；产出镜像 / 交付包用 `make package`；
+- controller-gen 生成文件（`api/v1alpha1/zz_generated.deepcopy.go`、`config/crd/bases/*.yaml`、`config/rbac/*.yaml`）属构建/打包输入，**clean 不删、保留**；同一规则的还有 hub 的 swaggo docs（`docs/{docs.go,swagger.json,swagger.yaml}`：已入库、clean 默认保留，见 hub README「swaggo API 文档」）。
 
 | make target | 作用 |
 | --- | --- |
-| `make build` | 编译二进制到 `bin/runner`（`go build ./cmd/runner`） |
+| `make build` | 编译二进制到 `output/bin/runner`（`go build ./cmd/runner`） |
 | `make package` | 组件打包：交叉编译 → 运行时镜像 + docker save + charts → 交付包 `output/software-distribution-platform-runner-<version>.tar.gz`，并尝试推送本地 registry（`build/runner/build.sh`） |
 | `make start-dev` | 启动本地开发服务（`hack/svc.sh start`：pid 文件 + 进程组管理，启动前自动清理旧实例；`go run ./cmd/runner`） |
 | `make stop-dev` | 停止本地开发服务（`hack/svc.sh stop`，按 pid 文件 + 进程特征兜底清理） |
-| `make clean` | 仅删生成物（`bin/ .run/ output/ coverage/` 及散落单文件），保留下载依赖与工具链、保留 controller-gen 生成文件 |
-| `make clean-deep` | 本仓彻底清理（删生成物，同 `clean`）；不删下载依赖/工具链，绝不触碰工作区共享资源（`../.bin` / `../.kubeconfig` / `../.dockerconfig`，属部署形态由 `deploy-local.sh` 管理）；同样保留 controller-gen 生成文件 |
-| `make start-deploy` | 本地全量部署：调用工作区根 `deploy-local.sh`（kind + helm 交付形态） |
-| `make stop-deploy` | 本地全量卸载：调用工作区根 `undeploy-local.sh`（保留 kind 集群） |
+| `make clean` | **先停本地服务**，再删生成物（`output/ .run/ coverage/`、历史位置 `bin/`、仓根裸编译二进制、散落单文件），保留下载依赖与工具链、保留 controller-gen 生成文件 |
+| `make clean NO_STOP=1` | 同上，但跳过停服务（CI / 无服务场景） |
+| `make clean-deep` | 本仓彻底清理（删生成物，同 `clean`）；不删下载依赖/工具链，删除范围严格限定在本仓目录内（不触碰仓库外的共享资源）；同样保留 controller-gen 生成文件 |
 
 ## 设计文档
 

@@ -5,7 +5,7 @@
 #   - 启动前若检测到旧服务（pid 文件存在且进程存活）先按进程组清理，再启动新实例；
 #   - 停止时同样依据 pid 文件（kill 进程组）+ 进程特征兜底清理；
 #   - 进程以 setsid 自立会话，pid 文件记录 session leader，kill 进程组可连带
-#     go run / 编译产物子进程，避免孤儿进程残留。
+#     vite / go run / 编译产物子进程，避免孤儿进程残留。
 set -uo pipefail
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -41,7 +41,7 @@ start_svc() {
   sleep 1
   local cmd
   case "$APP" in
-    console) cmd="[ -d node_modules ] || npm install >/dev/null 2>&1; npm run dev" ;;
+    console) cmd="[ -d node_modules ] || pnpm install >/dev/null 2>&1; pnpm dev" ;;
     hub)     cmd="go run ./cmd/hub" ;;
     runner)  cmd="go run ./cmd/runner" ;;
   esac
