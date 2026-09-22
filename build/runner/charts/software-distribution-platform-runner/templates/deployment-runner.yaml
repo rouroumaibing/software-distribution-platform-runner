@@ -2,6 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: {{ .Values.basic.component }}
+  namespace: {{ .Values.namespace }}
   labels:
     app: {{ .Values.basic.component }}
     version: v1
@@ -25,10 +26,10 @@ spec:
           env:
             - name: HUB_GATEWAY_URL
               value: {{ .Values.gateway.url }}
-            - name: CLUSTER_NAME
-              value: {{ .Values.cluster.name }}
-            - name: CLUSTER_AUTH_TOKEN
-              value: {{ .Values.cluster.authToken }}
+            - name: TARGET_NAME
+              value: {{ .Values.target.name }}
+            - name: TARGET_AUTH_TOKEN
+              value: {{ .Values.target.authToken }}
           image: {{ .Values.image.imageAddr }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           resources:

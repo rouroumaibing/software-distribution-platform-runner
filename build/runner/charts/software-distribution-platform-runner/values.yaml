@@ -1,3 +1,6 @@
+# 默认命名空间（与 hub chart 同约定：所有名字空间内资源注入 metadata.namespace，默认 sdp-workflow）
+namespace: sdp-workflow
+
 basic:
   # k8s 资源名统一用短名（镜像名才是全名）
   component: runner
@@ -13,12 +16,12 @@ resources:
   resources_mem_requests: 128Mi
   resources_mem_limits: 512Mi
 
-# gateway 配置须与 hub chart 成对修改
+# gateway 配置须与 hub chart 成对修改（hub 在 sdp-workflow）
 gateway:
-  url: ws://hub.sdp-system.svc:8080/gateway/ws
+  url: ws://hub.sdp-workflow.svc:8080/gateway/ws
   token: sdp-dev-token-2026
 
-# runner 需先在 hub 注册同名集群（POST /api/v1/clusters），token 与其一致
-cluster:
+# runner 需先在 hub 注册同名目标（POST /api/v1/targets），token 与其一致
+target:
   name: local-dev
   authToken: sdp-dev-token-2026

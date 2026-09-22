@@ -27,8 +27,8 @@ var errMissingName = errors.New("dispatch: ApplyPipelineRunPayload.Name is requi
 // controller takes over and schedules TaskRuns — this handler only does the
 // "create the root object" hop.
 type ApplyHandler struct {
-	Client      client.Client
-	ClusterName string
+	Client     client.Client
+	TargetName string
 }
 
 // Handle decodes the payload and creates the PipelineRun CR (idempotently:
@@ -57,13 +57,19 @@ func (h *ApplyHandler) Handle(payload json.RawMessage) error {
 			Name:      p.Name,
 			Namespace: ns,
 			Labels: map[string]string{
-				"sdp.io/cluster": h.ClusterName,
+				"sdp.io/target": h.TargetName,
 			},
 			Annotations: map[string]string{
-				"sdp.io/cluster": h.ClusterName,
+				"sdp.io/target": h.TargetName,
+				// C-03:固化触发时的 stage/task 定义快照,以及 hub 侧发布的
+				// PublishVersion,便于事后回溯"这次运行到底跑的是哪一版 DAG"。
+				"sdp.io/spec-snapshot": SnapshotSpec(p.Spec.Tasks),
 			},
 		},
 		Spec: p.Spec,
+	}
+	if p.PublishVersion != "" {
+		pr.Annotations["sdp.io/publish-version"] = p.PublishVersion
 	}
 
 	existing := &sdpv1alpha1.PipelineRun{}
@@ -82,8 +88,8 @@ func (h *ApplyHandler) Handle(payload json.RawMessage) error {
 		}
 		return err
 	}
-	log.Printf("dispatch: created PipelineRun %s/%s (%d tasks) on cluster %s",
-		ns, p.Name, len(p.Spec.Tasks), h.ClusterName)
+	log.Printf("dispatch: created PipelineRun %s/%s (%d tasks) on target %s",
+		ns, p.Name, len(p.Spec.Tasks), h.TargetName)
 	return nil
 }
 

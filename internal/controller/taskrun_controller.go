@@ -6,21 +6,44 @@ package controller
 
 import (
 	"context"
+	"io"
+	"log"
+	"sync"
+	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	sdpv1alpha1 "github.com/rouroumaibing/software-distribution-platform-runner/api/v1alpha1"
+	"github.com/rouroumaibing/software-distribution-platform-runner/pkg/connector"
 	"github.com/rouroumaibing/software-distribution-platform-runner/pkg/executor"
+	"github.com/rouroumaibing/software-distribution-platform-runner/pkg/logstream"
+	"github.com/rouroumaibing/software-distribution-platform-runner/pkg/metrics"
 )
 
 type TaskRunReconciler struct {
 	client.Client
 	JobBuilder *executor.JobBuilder
+
+	// Conn, when set, streams live pod logs back to the Hub (B-02). Nil in
+	// unit tests / standalone CRD demos.
+	Conn *connector.Client
+	// Clientset is the typed K8s client used to tail pod logs (the
+	// controller-runtime client can't stream logs). Nil disables streaming.
+	Clientset kubernetes.Interface
+	// TargetName is this Runner's identity, copied into log chunks so the
+	// Hub can attribute them.
+	TargetName string
+
+	// streaming tracks in-flight log streamers so a single Job isn't tailed
+	// by multiple goroutines across reconciles.
+	streaming sync.Map
 }
 
 func (r *TaskRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -80,6 +103,9 @@ func (r *TaskRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		tr.Status.JobRef = job.Name
 		now := metav1.Now()
 		tr.Status.StartTime = &now
+		// Kick off live log streaming for this Job (B-02). Best-effort: a
+		// missing pod / connection just means no live logs for this run.
+		r.maybeStreamLogs(&tr)
 		return ctrl.Result{}, r.Status().Update(ctx, &tr)
 	}
 
@@ -92,6 +118,7 @@ func (r *TaskRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	switch {
 	case job.Status.Succeeded > 0:
 		tr.Status.Phase = sdpv1alpha1.TaskRunSucceeded
+		metrics.RecordTaskRunPhase(string(tr.Spec.Type), string(tr.Status.Phase))
 		now := metav1.Now()
 		tr.Status.CompletionTime = &now
 
@@ -115,11 +142,86 @@ func (r *TaskRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			return ctrl.Result{RequeueAfter: backoff}, nil
 		}
 		tr.Status.Phase = sdpv1alpha1.TaskRunFailed
+		metrics.RecordTaskRunPhase(string(tr.Spec.Type), string(tr.Status.Phase))
+		metrics.Alert("taskrun", tr.Spec.TaskName, tr.Status.Message)
 		now := metav1.Now()
 		tr.Status.CompletionTime = &now
 	}
 
 	return ctrl.Result{}, r.Status().Update(ctx, &tr)
+}
+
+// connLogSender adapts connector.Client to logstream.Sender (B-02).
+type connLogSender struct{ conn *connector.Client }
+
+func (s connLogSender) SendLogChunk(p sdpv1alpha1.LogChunkPayload) error {
+	return s.conn.Send(connector.MessageLogChunk, p)
+}
+
+// maybeStreamLogs launches a goroutine that tails the TaskRun's Job pod and
+// ships log chunks to the Hub — but only once per Job (guarded by the
+// in-memory streaming map). It's a no-op when Conn/Clientset are unset or
+// log streaming is disabled by the SDP_LOG_STREAMING flag (B-09 downgrade).
+func (r *TaskRunReconciler) maybeStreamLogs(tr *sdpv1alpha1.TaskRun) {
+	if r.Conn == nil || r.Clientset == nil || !metrics.LogStreamingEnabled {
+		return
+	}
+	if tr.Status.JobRef == "" {
+		return
+	}
+	key := tr.Spec.PipelineRunRef + "/" + tr.Status.JobRef
+	if _, loaded := r.streaming.LoadOrStore(key, true); loaded {
+		return
+	}
+	go func() {
+		defer r.streaming.Delete(key)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		sender := connLogSender{conn: r.Conn}
+		p := sdpv1alpha1.LogChunkPayload{
+			TargetID:        r.TargetName,
+			PipelineRunName: tr.Spec.PipelineRunRef,
+			TaskName:        tr.Spec.TaskName,
+		}
+		// The pod may not be scheduled yet; retry briefly before giving up.
+		var lastErr error
+		for attempt := 0; attempt < 10; attempt++ {
+			_, rc, ok := r.jobPodLog(ctx, tr)
+			if ok {
+				streamErr := logstream.StreamLogs(ctx, rc, sender, p)
+				if streamErr != nil {
+					log.Printf("taskrun: log stream ended for %s: %v", tr.Status.JobRef, streamErr)
+				}
+				return
+			}
+			if lastErr != nil {
+				log.Printf("taskrun: waiting for pod log %s (attempt %d): %v", tr.Status.JobRef, attempt, lastErr)
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(2 * time.Second):
+			}
+		}
+	}()
+}
+
+// jobPodLog finds the first pod belonging to the TaskRun's Job and opens its
+// log stream. Returns (podName, stream, true) on success.
+func (r *TaskRunReconciler) jobPodLog(ctx context.Context, tr *sdpv1alpha1.TaskRun) (string, io.ReadCloser, bool) {
+	pods, err := r.Clientset.CoreV1().Pods(tr.Spec.Namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: "job-name=" + tr.Status.JobRef,
+	})
+	if err != nil || len(pods.Items) == 0 {
+		return "", nil, false
+	}
+	pod := pods.Items[0]
+	req := r.Clientset.CoreV1().Pods(tr.Spec.Namespace).GetLogs(pod.Name, &corev1.PodLogOptions{})
+	rc, err := req.Stream(ctx)
+	if err != nil {
+		return "", nil, false
+	}
+	return pod.Name, rc, true
 }
 
 // reconcileDeploy makes sure a Rollout CR exists for this Deploy task, then

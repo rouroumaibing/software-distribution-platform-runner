@@ -101,6 +101,14 @@ type RolloutSpec struct {
 	// WorkloadRef is the name of the Deployment being progressively updated.
 	WorkloadRef string `json:"workloadRef"`
 
+	// Replicas is the desired total replica count for the workload. When set
+	// it overrides the runner's default (and any stable Deployment already
+	// present inherits this count). When nil the runner reads the live
+	// stable Deployment's spec.replicas; if that's also unset it falls back
+	// to the historical default of 2 (B-06 — prefer the real replica count
+	// over a hard-coded constant).
+	Replicas *int32 `json:"replicas,omitempty"`
+
 	StableImage string `json:"stableImage"`
 	CanaryImage string `json:"canaryImage"`
 

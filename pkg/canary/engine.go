@@ -30,12 +30,17 @@ type Decision struct {
 //	canaryReady   = canary Deployment's Status.AvailableReplicas
 //	canaryDesired = canary Deployment's Spec.Replicas (what we last scaled to)
 //	totalReplicas = desired replica count of the stable workload
+//	healthy       = whether the canary passes its HealthCheck at the current
+//	                weight. The controller computes this: for PodReady it's
+//	                just (canaryReady >= canaryDesired); for HTTPProbe /
+//	                PrometheusQuery it's that AND the active probe result.
 //
 // The engine walks the canary Steps: first scale to a step's weight, wait for
-// the canary pods to become Ready, then advance. Pause steps hold at the
-// current weight. AutoRollback reverts to 0% canary weight when the health
-// probe fails past the threshold.
-func Evaluate(ro *sdpv1alpha1.Rollout, canaryReady, canaryDesired, totalReplicas int32) Decision {
+// the canary pods to become Ready (and healthy), then advance. Pause steps
+// hold at the current weight. AutoRollback reverts to 0% canary weight when
+// the health probe fails past the threshold (B-05 — real health checks
+// instead of only PodReady).
+func Evaluate(ro *sdpv1alpha1.Rollout, canaryReady, canaryDesired, totalReplicas int32, healthy bool) Decision {
 	spec := ro.Spec
 	status := ro.Status
 
@@ -100,21 +105,35 @@ func Evaluate(ro *sdpv1alpha1.Rollout, canaryReady, canaryDesired, totalReplicas
 		}
 	}
 
-	// At the target weight: wait for the canary pods to become Ready before
-	// declaring the step healthy. "Not ready yet" is progress, not a failure,
-	// so ConsecutiveFailures stays at 0 — only a genuine probe failure
-	// (HTTPProbe / PrometheusQuery hook) would increment it.
-	ready := canaryReady >= canaryDesired && canaryDesired > 0
+	// At the target weight: wait for the canary pods to become Ready AND
+	// pass the health check before declaring the step healthy.
+	ready := canaryDesired > 0 && canaryReady >= canaryDesired && healthy
 	if !ready {
+		// Distinguish "pods still coming up" (just progress) from a real
+		// health-check failure (pods are up but the probe failed). Only the
+		// latter counts toward ConsecutiveFailures / the rollback threshold,
+		// so a slow-to-start canary isn't rolled back mid-scale (B-05).
+		cf := status.ConsecutiveFailures
+		podsReady := canaryDesired > 0 && canaryReady >= canaryDesired
+		if podsReady && !healthy {
+			cf++
+		}
+		if ro.Spec.AutoRollback && spec.HealthCheck.FailureThreshold > 0 && cf >= spec.HealthCheck.FailureThreshold {
+			d := RollbackDecision(ro, totalReplicas)
+			d.CanaryReplicas = 0
+			d.StableReplicas = totalReplicas
+			d.Message = "health check failed past threshold, rolling back"
+			return d
+		}
 		return Decision{
 			Phase:               sdpv1alpha1.RolloutProgressing,
 			CurrentStepIndex:    status.CurrentStepIndex,
 			CurrentWeight:       target,
 			CanaryReplicas:      weightReplicas(target, totalReplicas),
 			StableReplicas:      totalReplicas - weightReplicas(target, totalReplicas),
-			ConsecutiveFailures: 0,
+			ConsecutiveFailures: cf,
 			RequeueAfter:        healthInterval(spec),
-			Message:             "waiting for canary pods",
+			Message:             "waiting for canary health",
 		}
 	}
 

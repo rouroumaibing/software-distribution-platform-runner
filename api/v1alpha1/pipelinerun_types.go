@@ -7,19 +7,74 @@ import (
 // PipelineTaskType defines the category of a task within the DAG.
 // The runner's PipelineRun controller branches its reconcile logic on this field:
 //   - Build:    run a command (or repo script) inside a tool image; success/failure
-//               is judged purely by the process exit code. No output inspection.
+//     is judged purely by the process exit code. No output inspection.
 //   - Release:  apply a software unit (Helm chart or raw manifest) into the target
-//               cluster, with values injected from the hub's parameter management.
-//               An optional Canary sub-spec drives a progressive rollout.
+//     cluster, with values injected from the hub's parameter management.
+//     An optional Canary sub-spec drives a progressive rollout.
 //   - Approval: pause the pipeline and wait for an external decision relayed from
-//               the hub.
+//     the hub.
 type PipelineTaskType string
 
 const (
 	TaskTypeBuild    PipelineTaskType = "Build"
 	TaskTypeRelease  PipelineTaskType = "Release"
 	TaskTypeApproval PipelineTaskType = "Approval"
+	// TaskTypeTest runs a test/verification command (e.g. a test suite,
+	// smoke check, or QA gate) the same way a Build task runs its script —
+	// it's a pod-executed command whose exit code decides pass/fail. Added
+	// for the "转测 / Test" pipeline class (C-13).
+	TaskTypeTest PipelineTaskType = "Test"
 )
+
+// ExecutionMode controls how the tasks that share a Stage are scheduled
+// relative to each other. Cross-stage ordering is always serial (the hub
+// derives DependsOn so every task in a later stage depends on all tasks in
+// the preceding stage); ExecutionMode only governs ordering *within* a
+// stage.
+type ExecutionMode string
+
+const (
+	// ExecutionModeParallel (the default — also the zero value) lets every
+	// task in a stage start as soon as its DependsOn is satisfied, with no
+	// implied ordering between siblings.
+	ExecutionModeParallel ExecutionMode = "Parallel"
+	// ExecutionModeSerial runs the stage's tasks one at a time, in the order
+	// they appear in Spec.Tasks: the next sibling only becomes runnable after
+	// the previous one has Succeeded. Implemented Runner-side in
+	// findRunnableTasks (C-06) — the hub does not need to synthesize
+	// DependsOn for it.
+	ExecutionModeSerial ExecutionMode = "Serial"
+)
+
+// EnvironmentType is the runner-side model of a target environment (C-13).
+// It's a coarse classification used for scheduling/quarantine decisions and
+// human-readable reporting; the authoritative environment identity is still
+// PipelineRunSpec.EnvironmentID (a hub-assigned UUID). The runner never
+// resolves environment semantics against the hub — it only validates/echoes
+// the class.
+type EnvironmentType string
+
+const (
+	EnvironmentDev       EnvironmentType = "dev"
+	EnvironmentTest      EnvironmentType = "test"
+	EnvironmentStaging   EnvironmentType = "staging"
+	EnvironmentProd      EnvironmentType = "prod"
+	EnvironmentCanary    EnvironmentType = "canary"
+	EnvironmentBlueGreen EnvironmentType = "bluegreen"
+)
+
+// IsValidEnvironment reports whether s is a known EnvironmentType. Unknown
+// values (including "") are rejected so a misconfigured hub payload fails
+// fast rather than silently scheduling into an unmodeled environment.
+func IsValidEnvironment(s string) bool {
+	switch EnvironmentType(s) {
+	case EnvironmentDev, EnvironmentTest, EnvironmentStaging,
+		EnvironmentProd, EnvironmentCanary, EnvironmentBlueGreen:
+		return true
+	default:
+		return false
+	}
+}
 
 // PipelineRunPhase represents the overall lifecycle phase of a PipelineRun.
 type PipelineRunPhase string
@@ -83,6 +138,11 @@ type PipelineTaskSpec struct {
 	// auto-generates DependsOn so every task in a later Stage depends on
 	// every task in the immediately preceding Stage.
 	Stage string `json:"stage,omitempty"`
+
+	// ExecutionMode overrides how siblings within the same Stage are ordered
+	// (defaults to ExecutionModeParallel). ExecutionModeSerial runs the
+	// stage's tasks one at a time. See the ExecutionMode doc above (C-06).
+	ExecutionMode ExecutionMode `json:"executionMode,omitempty"`
 
 	// Image is the execution environment the script runs in (e.g. an image
 	// with the language toolchain, kubectl/helm for deploy scripts, etc).

@@ -25,6 +25,7 @@ var (
 	MessageApplyPipelineRun = runnerapi.MessageApplyPipelineRun
 	MessageApproveTask      = runnerapi.MessageApproveTask
 	MessageRolloutControl   = runnerapi.MessageRolloutControl
+	MessageRerunTask        = runnerapi.MessageRerunTask
 	MessageStatusUpdate     = runnerapi.MessageStatusUpdate
 	MessageLogChunk         = runnerapi.MessageLogChunk
 	MessageHeartbeat        = runnerapi.MessageHeartbeat
@@ -35,34 +36,47 @@ var (
 // typically the PipelineRun controller for MessageApplyPipelineRun.
 type Handler func(payload json.RawMessage) error
 
+// OnConnectFunc is invoked once per (re)connection, immediately after the
+// WebSocket is established. The Runner uses it to resync local state with
+// the Hub (re-send status for in-flight runs) so work isn't silently lost
+// across a connection blip (C-05).
+type OnConnectFunc func()
+
 // Client maintains a single outbound connection to the Hub's gateway,
 // reconnecting with backoff on any failure. Every reconnect is followed by
-// a Reconcile-triggering resync request (not implemented here — left as a
-// TODO hook) so in-flight work isn't silently lost across a connection
-// blip.
+// an OnConnect callback so the Runner can resync its state (C-05).
 type Client struct {
-	hubURL      string
-	clusterName string
-	authToken   string // Cluster registration token, rotated periodically — see hub's clusters table.
+	hubURL     string
+	targetName string
+	authToken  string // Target registration token, rotated periodically — see hub's targets table.
 
-	handlers map[runnerapi.MessageType]Handler
+	handlers  map[runnerapi.MessageType]Handler
+	onConnect OnConnectFunc
 
 	conn   *websocket.Conn
 	outbox chan Message
 }
 
-func New(hubURL, clusterName, authToken string) *Client {
+func New(hubURL, targetName, authToken string) *Client {
 	return &Client{
-		hubURL:      hubURL,
-		clusterName: clusterName,
-		authToken:   authToken,
-		handlers:    make(map[MessageType]Handler),
-		outbox:      make(chan Message, 256),
+		hubURL:     hubURL,
+		targetName: targetName,
+		authToken:  authToken,
+		handlers:   make(map[MessageType]Handler),
+		outbox:     make(chan Message, 256),
 	}
 }
 
+// OnMessage registers a handler for an inbound message type.
 func (c *Client) OnMessage(t runnerapi.MessageType, h Handler) {
 	c.handlers[t] = h
+}
+
+// OnConnect registers a callback fired on every successful (re)connection.
+// The hub already runs DrainTarget on connect; this is the Runner-side
+// counterpart that re-asserts local state upstream.
+func (c *Client) OnConnect(fn OnConnectFunc) {
+	c.onConnect = fn
 }
 
 // Send queues a message for delivery to the Hub; safe to call from
@@ -104,8 +118,8 @@ func (c *Client) Run(ctx context.Context) {
 
 func (c *Client) connectAndServe(ctx context.Context) error {
 	header := map[string][]string{
-		"Authorization":  {"Bearer " + c.authToken},
-		"X-Cluster-Name": {c.clusterName},
+		"Authorization": {"Bearer " + c.authToken},
+		"X-Target-Name": {c.targetName},
 	}
 	conn, _, err := websocket.DefaultDialer.DialContext(ctx, c.hubURL, header)
 	if err != nil {
@@ -113,6 +127,13 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 	}
 	defer conn.Close()
 	c.conn = conn
+
+	// We just (re)established the long connection. Fire the resync hook so
+	// the Runner re-asserts its local state with the Hub (C-05). The hub
+	// side runs DrainTarget on connect; this is the Runner counterpart.
+	if c.onConnect != nil {
+		c.onConnect()
+	}
 
 	readErr := make(chan error, 1)
 	go c.readLoop(conn, readErr)
@@ -127,7 +148,7 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 		case err := <-readErr:
 			return err
 		case <-heartbeat.C:
-			_ = c.Send(MessageHeartbeat, map[string]string{"cluster": c.clusterName})
+			_ = c.Send(MessageHeartbeat, map[string]string{"target": c.targetName})
 		case msg := <-c.outbox:
 			if err := conn.WriteJSON(msg); err != nil {
 				return err

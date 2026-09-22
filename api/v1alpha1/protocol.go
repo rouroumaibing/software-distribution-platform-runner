@@ -12,6 +12,9 @@ const (
 	// Hub -> Runner
 	MessageApplyPipelineRun MessageType = "apply_pipeline_run"
 	MessageApproveTask      MessageType = "approve_task"
+	// MessageRerunTask asks the Runner to re-run a single failed/pending task
+	// (and its downstream dependents) without re-dispatching the whole run.
+	MessageRerunTask MessageType = "rerun_task"
 	// MessageRolloutControl relays an operator's pause/promote/rollback
 	// command for a Release task's Rollout CR (see RolloutControlPayload).
 	MessageRolloutControl MessageType = "rollout_control"

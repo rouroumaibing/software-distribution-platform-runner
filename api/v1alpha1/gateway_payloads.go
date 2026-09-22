@@ -7,7 +7,7 @@ import metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 // so the hub can keep its pipeline_runs / task_runs history rows in sync
 // without the runner shipping raw CRD objects over the wire.
 type StatusUpdatePayload struct {
-	ClusterID            string                 `json:"clusterID"`
+	TargetID             string                 `json:"targetID"`
 	PipelineRunName      string                 `json:"pipelineRunName"`
 	PipelineRunNamespace string                 `json:"pipelineRunNamespace"`
 	Phase                PipelineRunPhase       `json:"phase"`
@@ -20,7 +20,7 @@ type StatusUpdatePayload struct {
 // LogChunkPayload is sent Runner -> Hub over MessageLogChunk. Live logs are
 // streamed per chunk rather than archived; the hub stores them for display.
 type LogChunkPayload struct {
-	ClusterID       string `json:"clusterID"`
+	TargetID        string `json:"targetID"`
 	PipelineRunName string `json:"pipelineRunName"`
 	TaskName        string `json:"taskName,omitempty"`
 	Stream          string `json:"stream,omitempty"` // "stdout" | "stderr"
@@ -37,6 +37,12 @@ type ApplyPipelineRunPayload struct {
 	Name      string          `json:"name"`
 	Namespace string          `json:"namespace"`
 	Spec      PipelineRunSpec `json:"spec"`
+	// PublishVersion is the hub-side pipeline/publish version this run was
+	// triggered from. It's an optional, immutable marker captured by the
+	// ApplyHandler as a snapshot annotation so the exact stage/task
+	// definitions that produced this run are reconstructable later
+	// (see C-03 — "trigger-time snapshot 固化").
+	PublishVersion string `json:"publishVersion,omitempty"`
 }
 
 // RolloutAction is the operator command carried by RolloutControlPayload.
@@ -56,8 +62,8 @@ const (
 // it, applies the command to Status (scale/step changes), and clears the
 // annotation — keeping all Rollout writes inside the reconciler.
 type RolloutControlPayload struct {
-	PipelineRunName string `json:"pipelineRunName"`
-	TaskName        string `json:"taskName"`
+	PipelineRunName string        `json:"pipelineRunName"`
+	TaskName        string        `json:"taskName"`
 	Action          RolloutAction `json:"action"`
 	// Operator is the hub-resolved identity of who issued the command;
 	// recorded in the Rollout's status message for audit.
@@ -77,4 +83,17 @@ type ApproveTaskPayload struct {
 	Approver string `json:"approver"`
 	// Rejected, when true, fails the PipelineRun immediately.
 	Rejected bool `json:"rejected,omitempty"`
+}
+
+// RerunTaskPayload is the Hub -> Runner envelope carried by
+// MessageRerunTask. It asks the Runner to reset a single task (and,
+// transitively, every downstream task that depends on it) so the DAG picks
+// it up again — without re-dispatching the entire PipelineRun. The Runner's
+// RerunHandler finds the TaskRun by the pipeline-run/task labels, clears its
+// terminal state, and deletes the underlying Job/Rollout so it is rebuilt.
+type RerunTaskPayload struct {
+	PipelineRunName string `json:"pipelineRunName"`
+	TaskName        string `json:"taskName"`
+	// Operator is the hub-resolved identity issuing the rerun (audit only).
+	Operator string `json:"operator,omitempty"`
 }

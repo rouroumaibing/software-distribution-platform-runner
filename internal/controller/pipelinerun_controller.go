@@ -29,10 +29,10 @@ type PipelineRunReconciler struct {
 	// is started without a Hub (e.g. a pure in-cluster CRD demo).
 	Conn *connector.Client
 
-	// ClusterName is this Runner's identity, copied into status reports so
+	// TargetName is this Runner's identity, copied into status reports so
 	// the Hub can attribute the update (the Hub ultimately keys on the
-	// connection's resolved cluster UUID, not this string).
-	ClusterName string
+	// connection's resolved target UUID, not this string).
+	TargetName string
 }
 
 // updateStatus persists the PipelineRun status and, if a Hub connection is
@@ -54,7 +54,7 @@ func (r *PipelineRunReconciler) reportStatus(pr *sdpv1alpha1.PipelineRun) {
 		return
 	}
 	payload := &sdpv1alpha1.StatusUpdatePayload{
-		ClusterID:            r.ClusterName,
+		TargetID:             r.TargetName,
 		PipelineRunName:      pr.Name,
 		PipelineRunNamespace: pr.Namespace,
 		Phase:                pr.Status.Phase,
@@ -146,11 +146,51 @@ func findRunnableTasks(tasks []sdpv1alpha1.PipelineTaskSpec, existing map[string
 		if _, started := existing[t.Name]; started {
 			continue
 		}
-		if dependenciesSatisfied(t.DependsOn, existing) {
-			runnable = append(runnable, t)
+		if !dependenciesSatisfied(t.DependsOn, existing) {
+			continue
 		}
+		// Within a Serial stage, a task may only start once every earlier
+		// task in the same stage has Succeeded — enforcing one-at-a-time
+		// ordering without the hub having to synthesize DependsOn (C-06).
+		if serialBlocked(t, tasks, existing) {
+			continue
+		}
+		runnable = append(runnable, t)
 	}
 	return runnable
+}
+
+// serialBlocked reports whether t must wait because it lives in a Serial
+// stage and an earlier sibling in that stage hasn't Succeeded yet. Parallel
+// (or unstaged) tasks are never blocked this way.
+func serialBlocked(t sdpv1alpha1.PipelineTaskSpec, tasks []sdpv1alpha1.PipelineTaskSpec, existing map[string]*sdpv1alpha1.TaskRun) bool {
+	if t.Stage == "" || t.ExecutionMode != sdpv1alpha1.ExecutionModeSerial {
+		return false
+	}
+	for _, other := range tasks {
+		if other.Stage != t.Stage || other.ExecutionMode != sdpv1alpha1.ExecutionModeSerial {
+			continue
+		}
+		// "earlier" = appears before t in Spec.Tasks (declaration order is
+		// the serial order).
+		if orderIndex(tasks, other.Name) >= orderIndex(tasks, t.Name) {
+			continue
+		}
+		tr, ok := existing[other.Name]
+		if !ok || tr.Status.Phase != sdpv1alpha1.TaskRunSucceeded {
+			return true
+		}
+	}
+	return false
+}
+
+func orderIndex(tasks []sdpv1alpha1.PipelineTaskSpec, name string) int {
+	for i, t := range tasks {
+		if t.Name == name {
+			return i
+		}
+	}
+	return -1
 }
 
 func dependenciesSatisfied(dependsOn []string, existing map[string]*sdpv1alpha1.TaskRun) bool {
@@ -262,4 +302,55 @@ func (r *PipelineRunReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&sdpv1alpha1.PipelineRun{}).
 		Owns(&sdpv1alpha1.TaskRun{}). // TaskRun 状态变化会触发父 PipelineRun 重新 Reconcile
 		Complete(r)
+}
+
+// statusSender is the minimal surface ResyncAll needs to push a status frame
+// back to the Hub. connector.Client satisfies it; a test double can capture
+// payloads without a live WebSocket.
+type statusSender interface {
+	Send(t connector.MessageType, payload any) error
+}
+
+// ResyncAll re-asserts this Runner's local state with the Hub after a
+// (re)connection: it lists every non-terminal PipelineRun owned by this
+// target and re-sends its current status. The Hub already runs DrainTarget
+// on connect; this is the Runner counterpart so in-flight work isn't
+// silently lost across a connection blip (C-05). Best-effort: a single
+// failed send doesn't abort the rest.
+func ResyncAll(ctx context.Context, c client.Client, sender statusSender, targetName string) error {
+	var list sdpv1alpha1.PipelineRunList
+	if err := c.List(ctx, &list, client.MatchingLabels{"sdp.io/target": targetName}); err != nil {
+		return err
+	}
+	for i := range list.Items {
+		pr := &list.Items[i]
+		if isTerminalPhase(pr.Status.Phase) {
+			continue
+		}
+		payload := &sdpv1alpha1.StatusUpdatePayload{
+			TargetID:             targetName,
+			PipelineRunName:      pr.Name,
+			PipelineRunNamespace: pr.Namespace,
+			Phase:                pr.Status.Phase,
+			Message:              pr.Status.Message,
+			StartTime:            pr.Status.StartTime,
+			CompletionTime:       pr.Status.CompletionTime,
+			Tasks:                pr.Status.Tasks,
+		}
+		if err := sender.Send(connector.MessageStatusUpdate, payload); err != nil {
+			log.Printf("pipelinerun: resync send failed for %s/%s: %v", pr.Namespace, pr.Name, err)
+		}
+	}
+	return nil
+}
+
+func isTerminalPhase(phase sdpv1alpha1.PipelineRunPhase) bool {
+	switch phase {
+	case sdpv1alpha1.PipelineRunSucceeded,
+		sdpv1alpha1.PipelineRunFailed,
+		sdpv1alpha1.PipelineRunCancelled:
+		return true
+	default:
+		return false
+	}
 }
