@@ -36,6 +36,14 @@ rules:
   - apiGroups: [""]
     resources: ["services"]
     verbs: ["get", "list", "watch"]
+  # Rollout 的 canary Ingress（B-04）：RolloutReconciler Owns(&networkingv1.Ingress{})，
+  # 控制器缓存必须 list/watch 该资源，否则 Ingress informer 永不 sync →
+  # manager.WaitForCacheSync 超时、runner 起不来（表现为 rollout/pipelinerun
+  # 各 controller 轮流传出 "timed out waiting for cache to be synced"）。
+  # create/update/patch/delete 供 ensureCanaryIngress 建/改/GC。
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   # ApplyHandler 需要发现/创建目标命名空间（缓存的 client Get 会等
   # informer 同步，缺权限会导致 handler 永久阻塞、readLoop 卡死）。
   - apiGroups: [""]
