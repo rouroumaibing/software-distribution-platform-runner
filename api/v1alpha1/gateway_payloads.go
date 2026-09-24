@@ -98,6 +98,34 @@ type RerunTaskPayload struct {
 	Operator string `json:"operator,omitempty"`
 }
 
+// CancelPipelineRunPayload is the Hub -> Runner envelope carried by
+// MessageCancelPipelineRun. It asks the Runner to stop the named PipelineRun.
+//
+// The Runner's dispatch handler does NOT write status itself — it stamps the
+// AnnCancelRequested annotation and lets the PipelineRun reconciler apply the
+// cancel, so the reconciler stays the only writer of PipelineRun status
+// (writing it from the handler would race the reconcile loop).
+type CancelPipelineRunPayload struct {
+	PipelineRunName string `json:"pipelineRunName"`
+	// Namespace is the cluster namespace holding the PipelineRun CR. The Hub
+	// knows it from its pipeline_runs row (CRNamespace), so the Runner needs
+	// no cluster-wide lookup to resolve the CR.
+	Namespace string `json:"namespace"`
+	// Operator is the hub-resolved identity issuing the cancel (audit only).
+	Operator string `json:"operator,omitempty"`
+}
+
+// Cancel-request annotations: stamped by the Runner's dispatch.CancelHandler,
+// consumed and cleared by PipelineRunReconciler. They live here beside the
+// payload so both sides agree on exactly one pair of keys.
+const (
+	// AnnCancelRequested marks that an operator asked to cancel the run; its
+	// presence (value "true") is what the reconciler keys on.
+	AnnCancelRequested = "sdp.io/cancel-requested"
+	// AnnCancelOperator records who asked, for the status message / audit.
+	AnnCancelOperator = "sdp.io/cancel-operator"
+)
+
 // Agent op lifecycle states reported via MessageAgentOpStatus. They mirror
 // the hub-side agent_ops ledger (hub internal/target/models): the Runner may
 // move an op forward queued→running→succeeded|failed; terminal states are

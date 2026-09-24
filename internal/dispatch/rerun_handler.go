@@ -96,6 +96,19 @@ func (h *RerunHandler) Handle(payload json.RawMessage) error {
 		}
 	}
 
+	// Revive the run. The PipelineRun reconciler short-circuits on terminal
+	// phases, so a run left Failed would never re-schedule the TaskRun we just
+	// reset — the rerun would silently do nothing. Only Failed is revived: a
+	// Cancelled run reflects an explicit operator stop and must stay cancelled.
+	if pr.Status.Phase == sdpv1alpha1.PipelineRunFailed {
+		pr.Status.Phase = sdpv1alpha1.PipelineRunRunning
+		pr.Status.CompletionTime = nil
+		pr.Status.Message = "rerun requested"
+		if err := h.Client.Status().Update(context.Background(), &pr); err != nil && !apierrors.IsNotFound(err) {
+			return err
+		}
+	}
+
 	log.Printf("dispatch: rerun %s/%s (downstream=%d) by %s",
 		p.PipelineRunName, p.TaskName, len(downstream), p.Operator)
 	return nil

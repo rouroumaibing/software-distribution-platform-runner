@@ -22,16 +22,17 @@ type MessageType = runnerapi.MessageType
 type Message = runnerapi.Message
 
 var (
-	MessageApplyPipelineRun = runnerapi.MessageApplyPipelineRun
-	MessageApproveTask      = runnerapi.MessageApproveTask
-	MessageRolloutControl   = runnerapi.MessageRolloutControl
-	MessageRerunTask        = runnerapi.MessageRerunTask
-	MessageAgentOp          = runnerapi.MessageAgentOp
-	MessageStatusUpdate     = runnerapi.MessageStatusUpdate
-	MessageLogChunk         = runnerapi.MessageLogChunk
-	MessageHeartbeat        = runnerapi.MessageHeartbeat
-	MessageAgentOpStatus    = runnerapi.MessageAgentOpStatus
-	MessageAgentOpLog       = runnerapi.MessageAgentOpLog
+	MessageApplyPipelineRun  = runnerapi.MessageApplyPipelineRun
+	MessageApproveTask       = runnerapi.MessageApproveTask
+	MessageRolloutControl    = runnerapi.MessageRolloutControl
+	MessageRerunTask         = runnerapi.MessageRerunTask
+	MessageCancelPipelineRun = runnerapi.MessageCancelPipelineRun
+	MessageAgentOp           = runnerapi.MessageAgentOp
+	MessageStatusUpdate      = runnerapi.MessageStatusUpdate
+	MessageLogChunk          = runnerapi.MessageLogChunk
+	MessageHeartbeat         = runnerapi.MessageHeartbeat
+	MessageAgentOpStatus     = runnerapi.MessageAgentOpStatus
+	MessageAgentOpLog        = runnerapi.MessageAgentOpLog
 )
 
 // Handler processes an inbound message from the Hub. Registered per

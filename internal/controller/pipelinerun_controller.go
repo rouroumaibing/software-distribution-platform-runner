@@ -77,12 +77,17 @@ func (r *PipelineRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
+	// Cancel is consumed here rather than by the dispatch handler so this
+	// reconciler stays the single writer of PipelineRun status: the handler
+	// only stamps an annotation (see applyCancelIfRequested).
+	if done, err := r.applyCancelIfRequested(ctx, &pr); err != nil || done {
+		return ctrl.Result{}, err
+	}
+
 	if pr.Status.Phase == "" {
 		pr.Status.Phase = sdpv1alpha1.PipelineRunPending
 	}
-	if pr.Status.Phase == sdpv1alpha1.PipelineRunSucceeded ||
-		pr.Status.Phase == sdpv1alpha1.PipelineRunFailed ||
-		pr.Status.Phase == sdpv1alpha1.PipelineRunCancelled {
+	if isTerminalPhase(pr.Status.Phase) {
 		return ctrl.Result{}, nil // 终态,不用再处理
 	}
 

@@ -15,6 +15,11 @@ const (
 	// MessageRerunTask asks the Runner to re-run a single failed/pending task
 	// (and its downstream dependents) without re-dispatching the whole run.
 	MessageRerunTask MessageType = "rerun_task"
+	// MessageCancelPipelineRun asks the Runner to stop a running PipelineRun:
+	// its reconciler marks the CR Cancelled and tears down every in-flight
+	// TaskRun so no further work is scheduled. It is the operator's emergency
+	// brake for a runaway or wedged run (see CancelPipelineRunPayload).
+	MessageCancelPipelineRun MessageType = "cancel_pipeline_run"
 	// MessageRolloutControl relays an operator's pause/promote/rollback
 	// command for a Release task's Rollout CR (see RolloutControlPayload).
 	MessageRolloutControl MessageType = "rollout_control"

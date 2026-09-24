@@ -112,6 +112,8 @@ func main() {
 		conn.OnMessage(connector.MessageRolloutControl, rolloutControlHandler.Handle)
 		rerunHandler := &dispatch.RerunHandler{Client: mgr.GetClient()}
 		conn.OnMessage(connector.MessageRerunTask, rerunHandler.Handle)
+		cancelHandler := &dispatch.CancelHandler{Client: mgr.GetClient()}
+		conn.OnMessage(connector.MessageCancelPipelineRun, cancelHandler.Handle)
 
 		// C-05: on every (re)connection, re-assert local state with the Hub so
 		// in-flight work isn't silently lost. The hub runs DrainTarget on
