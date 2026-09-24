@@ -86,7 +86,7 @@ func TestRerunHandlerResetsTargetAndDeletesDownstream(t *testing.T) {
 			Name: "pr1-a", Namespace: "ns",
 			Labels: map[string]string{"sdp.io/pipeline-run": "pr1", "sdp.io/task": "a"},
 		},
-		Spec: sdpv1alpha1.TaskRunSpec{PipelineRunRef: "pr1", TaskName: "a", Namespace: "ns", Type: sdpv1alpha1.TaskTypeBuild},
+		Spec:   sdpv1alpha1.TaskRunSpec{PipelineRunRef: "pr1", TaskName: "a", Namespace: "ns", Type: sdpv1alpha1.TaskTypeBuild},
 		Status: sdpv1alpha1.TaskRunStatus{Phase: sdpv1alpha1.TaskRunFailed, JobRef: "job-a", RetryCount: 2},
 	}
 	trB := &sdpv1alpha1.TaskRun{
@@ -94,7 +94,7 @@ func TestRerunHandlerResetsTargetAndDeletesDownstream(t *testing.T) {
 			Name: "pr1-b", Namespace: "ns",
 			Labels: map[string]string{"sdp.io/pipeline-run": "pr1", "sdp.io/task": "b"},
 		},
-		Spec: sdpv1alpha1.TaskRunSpec{PipelineRunRef: "pr1", TaskName: "b", Namespace: "ns", Type: sdpv1alpha1.TaskTypeBuild},
+		Spec:   sdpv1alpha1.TaskRunSpec{PipelineRunRef: "pr1", TaskName: "b", Namespace: "ns", Type: sdpv1alpha1.TaskTypeBuild},
 		Status: sdpv1alpha1.TaskRunStatus{Phase: sdpv1alpha1.TaskRunPending, JobRef: "job-b"},
 	}
 

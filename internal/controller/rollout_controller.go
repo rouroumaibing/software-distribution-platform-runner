@@ -22,6 +22,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	sdpv1alpha1 "github.com/rouroumaibing/software-distribution-platform-runner/api/v1alpha1"
@@ -461,6 +462,9 @@ func (r *RolloutReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&appsv1.Deployment{}). // Deployment status changes trigger re-eval
 		Owns(&corev1.Service{}).
 		Owns(&networkingv1.Ingress{}). // canary Ingress (B-04) GCs with the Rollout
+		// D-01 修复：同进程重建 manager 需跳过 controller 名唯一校验（见
+		// pipelinerun_controller.go 详注）。
+		WithOptions(controller.Options{SkipNameValidation: &skipNameValidation}).
 		Complete(r)
 }
 

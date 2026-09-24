@@ -18,11 +18,23 @@ const (
 	// MessageRolloutControl relays an operator's pause/promote/rollback
 	// command for a Release task's Rollout CR (see RolloutControlPayload).
 	MessageRolloutControl MessageType = "rollout_control"
+	// MessageAgentOp dispatches one agent operation (§9.5 exec / §9.9 接入编排)
+	// to the Runner that owns the target's cluster access. The Runner executes
+	// it out-of-band and reports progress via agent_op_status / agent_op_log.
+	MessageAgentOp MessageType = "agent_op"
 
 	// Runner -> Hub
 	MessageStatusUpdate MessageType = "status_update"
 	MessageLogChunk     MessageType = "log_chunk"
 	MessageHeartbeat    MessageType = "heartbeat"
+	// MessageAgentOpStatus reports a lifecycle transition of a dispatched
+	// agent op (queued→running→succeeded|failed); the hub validates the
+	// transition and updates its agent_ops ledger row.
+	MessageAgentOpStatus MessageType = "agent_op_status"
+	// MessageAgentOpLog streams one output chunk produced by an agent op
+	// (stdout/stderr); the hub persists it for replay and fans it out to SSE
+	// subscribers.
+	MessageAgentOpLog MessageType = "agent_op_log"
 )
 
 // Message is the envelope for every frame on the connection: a typed

@@ -18,6 +18,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	sdpv1alpha1 "github.com/rouroumaibing/software-distribution-platform-runner/api/v1alpha1"
@@ -285,5 +286,8 @@ func (r *TaskRunReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&sdpv1alpha1.TaskRun{}).
 		Owns(&batchv1.Job{}).         // Job 状态变化会触发父 TaskRun 重新 Reconcile
 		Owns(&sdpv1alpha1.Rollout{}). // Rollout 状态变化会触发父 TaskRun 重新 Reconcile
+		// D-01 修复：同进程重建 manager 需跳过 controller 名唯一校验（见
+		// pipelinerun_controller.go 详注）。
+		WithOptions(controller.Options{SkipNameValidation: &skipNameValidation}).
 		Complete(r)
 }

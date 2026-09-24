@@ -17,12 +17,12 @@ func mkRollout() *sdpv1alpha1.Rollout {
 			CanaryImage: "c",
 			Steps:       []sdpv1alpha1.CanaryStep{{SetWeight: &w}},
 			HealthCheck: sdpv1alpha1.HealthCheckSpec{
-				Type:            sdpv1alpha1.HealthCheckPodReady,
-				IntervalSeconds: 1,
+				Type:             sdpv1alpha1.HealthCheckPodReady,
+				IntervalSeconds:  1,
 				FailureThreshold: 3,
 			},
 			TrafficRouting: sdpv1alpha1.TrafficRoutingSpec{Type: sdpv1alpha1.TrafficRoutingDeploymentWeight},
-			AutoRollback:    true,
+			AutoRollback:   true,
 		},
 		Status: sdpv1alpha1.RolloutStatus{CurrentStepIndex: 0, CurrentWeight: 0},
 	}

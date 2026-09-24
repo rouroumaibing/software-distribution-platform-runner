@@ -97,3 +97,52 @@ type RerunTaskPayload struct {
 	// Operator is the hub-resolved identity issuing the rerun (audit only).
 	Operator string `json:"operator,omitempty"`
 }
+
+// Agent op lifecycle states reported via MessageAgentOpStatus. They mirror
+// the hub-side agent_ops ledger (hub internal/target/models): the Runner may
+// move an op forward queued→running→succeeded|failed; terminal states are
+// immutable and rejected by the hub's transition guard.
+const (
+	AgentOpStatusRunning   = "running"
+	AgentOpStatusSucceeded = "succeeded"
+	AgentOpStatusFailed    = "failed"
+	AgentOpStreamStdout    = "stdout"
+	AgentOpStreamStderr    = "stderr"
+
+	// AgentOpTypeExec is the only op type dispatched to the Runner today
+	// (§16.5 裁定); install/upgrade await the §9.9 bootstrap flow.
+	AgentOpTypeExec = "exec"
+)
+
+// AgentOpDispatchPayload is the Hub -> Runner envelope carried by
+// MessageAgentOp. OpID identifies the hub-side agent_ops ledger row the
+// Runner's status/log reports must reference. Detail carries the op argument
+// verbatim (the command or script for exec). Kubeconfig is set only for
+// kubeconfig-access environments: the Runner is the direct-connect executor
+// and legitimately needs cluster access the hub itself does not have; the
+// wire is the authenticated gateway connection (§9.5 trust boundary).
+type AgentOpDispatchPayload struct {
+	OpID       string `json:"opID"`
+	TargetID   string `json:"targetID"`
+	EnvID      string `json:"envID,omitempty"`
+	OpType     string `json:"opType"` // exec (install/upgrade dispatch is deferred to the bootstrap flow)
+	Detail     string `json:"detail"`
+	Namespace  string `json:"namespace,omitempty"` // where the op's Job runs; hub supplies the environment namespace
+	Kubeconfig []byte `json:"kubeconfig,omitempty"`
+}
+
+// AgentOpStatusPayload is the Runner -> Hub envelope carried by
+// MessageAgentOpStatus: one lifecycle transition of a dispatched op.
+type AgentOpStatusPayload struct {
+	OpID    string `json:"opID"`
+	Status  string `json:"status"` // running | succeeded | failed
+	Message string `json:"message,omitempty"`
+}
+
+// AgentOpLogPayload is the Runner -> Hub envelope carried by
+// MessageAgentOpLog: one streamed output chunk of a running op.
+type AgentOpLogPayload struct {
+	OpID   string `json:"opID"`
+	Stream string `json:"stream,omitempty"` // stdout | stderr
+	Chunk  string `json:"chunk"`
+}

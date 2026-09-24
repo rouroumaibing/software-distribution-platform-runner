@@ -4,10 +4,10 @@ import "testing"
 
 func TestResolveTotalReplicas(t *testing.T) {
 	tests := []struct {
-		name    string
-		spec    *int32
-		live    *int32
-		want    int32
+		name string
+		spec *int32
+		live *int32
+		want int32
 	}{
 		{"spec wins", pi32(5), pi32(3), 5},
 		{"live when no spec", nil, pi32(4), 4},

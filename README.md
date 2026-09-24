@@ -20,6 +20,12 @@
 | `make clean NO_STOP=1` | 同上，但跳过停服务（CI / 无服务场景） |
 | `make clean-deep` | 本仓彻底清理（删生成物，同 `clean`）；不删下载依赖/工具链，删除范围严格限定在本仓目录内（不触碰仓库外的共享资源）；同样保留 controller-gen 生成文件 |
 
+## 行为要点（接入侧代理）
+
+- **无入站 HTTP**：runner 出站回连 hub 的 WS 网关（`/gateway/ws`，`GATEWAY_TOKEN` 认证），断线按指数退避重连；**D-01**：重连后 informer cache sync 超时（约 2 分钟）会**主动退出**交由容器重启兜底——hub 多次重启窗口期可能出现短暂 CrashLoopBackOff，属设计行为，pod 重建即恢复。
+- **自身不执行任务**：把 hub 下发的 spec 翻译成目标集群里的 K8s Job（`pkg/executor/job_builder.go`：EmptyDir 工作区 + main/release 容器跑脚本 / `helm upgrade --install` / `kubectl apply`）；只消费 hub 已鉴权下发的 spec，自身无授权逻辑（集群侧权限由 k8s RBAC 约束，见 docs 仓 runner Story §4.4）。
+- **任务类型**：`Build` / `Test` / `Release` / `Approval`（`api/v1alpha1/pipelinerun_types.go` 枚举校验；controller 按类型分支 reconcile）。
+
 ## 设计文档
 
 本组件的设计文档（实现 Story、kubebuilder 安装、任务处理与 DAG 推进、授权边界等）已统一收敛到独立的 [`software-distribution-platform-docs`](https://github.com/rouroumaibing/software-distribution-platform-docs) 仓库（单一真源），本仓库不再存放设计文档正文。

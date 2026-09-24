@@ -17,7 +17,7 @@ func TestThresholdMet(t *testing.T) {
 		{"0.5", "1.0", true, false},
 		{"1.0", "1.0", true, false},
 		{"2.0", "1.0", false, false},
-		{"", "1.0", false, true},   // empty value unparseable -> unhealthy
+		{"", "1.0", false, true},    // empty value unparseable -> unhealthy
 		{"0.5", "abc", false, true}, // bad threshold
 	}
 	for _, tc := range tests {

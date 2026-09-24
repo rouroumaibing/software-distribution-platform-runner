@@ -15,6 +15,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	sdpv1alpha1 "github.com/rouroumaibing/software-distribution-platform-runner/api/v1alpha1"
@@ -301,8 +302,18 @@ func (r *PipelineRunReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&sdpv1alpha1.PipelineRun{}).
 		Owns(&sdpv1alpha1.TaskRun{}). // TaskRun 状态变化会触发父 PipelineRun 重新 Reconcile
+		// D-01 修复（2026-09-23 第十八批）：manager 启动失败重试会在**同一进程**
+		// 里重建 manager——controller-runtime 默认按 controller 名去重（指标唯一），
+		// 二次 Setup 会报 "controller with name pipelinerun already exists"，
+		// 把一次瞬时 cache-sync 超时放大成永久 CrashLoop。SkipNameValidation
+		// 关掉该校验，重试语义才成立（旧 manager 已停，不会双跑）。
+		WithOptions(controller.Options{SkipNameValidation: &skipNameValidation}).
 		Complete(r)
 }
+
+// skipNameValidation is shared by all reconcilers in this binary; a value
+// (non-nil pointer) must be passed or controller-runtime rejects the option.
+var skipNameValidation = true
 
 // statusSender is the minimal surface ResyncAll needs to push a status frame
 // back to the Hub. connector.Client satisfies it; a test double can capture
