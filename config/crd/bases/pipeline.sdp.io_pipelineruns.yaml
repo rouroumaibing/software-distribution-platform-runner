@@ -176,6 +176,12 @@ spec:
                       items:
                         type: string
                       type: array
+                    executionMode:
+                      description: |-
+                        ExecutionMode overrides how siblings within the same Stage are ordered
+                        (defaults to ExecutionModeParallel). ExecutionModeSerial runs the
+                        stage's tasks one at a time. See the ExecutionMode doc above (C-06).
+                      type: string
                     image:
                       description: |-
                         Image is the execution environment the script runs in (e.g. an image
@@ -185,6 +191,12 @@ spec:
                       description: Name must be unique within the PipelineRun; referenced
                         by DependsOn.
                       type: string
+                    privileged:
+                      description: |-
+                        Privileged (G-4) runs the task container with
+                        securityContext.privileged=true so docker-in-docker /
+                        containerd-in-containerd build images work. Opt-in per task.
+                      type: boolean
                     produces:
                       description: |-
                         Produces lists artifact keys this task uploads to the artifact store
@@ -193,6 +205,184 @@ spec:
                       items:
                         type: string
                       type: array
+                    releaseSpec:
+                      description: |-
+                        ReleaseSpec is required when Type == Release; it describes the chart
+                        or manifest to apply plus the values injected from parameter management.
+                      properties:
+                        canary:
+                          description: |-
+                            Canary, when set, drives a progressive rollout via the Rollout
+                            controller instead of a single apply.
+                          properties:
+                            autoRollback:
+                              default: true
+                              description: |-
+                                AutoRollback, when true, automatically reverts to 0% canary weight
+                                once HealthCheck.FailureThreshold consecutive checks fail.
+                              type: boolean
+                            canaryImage:
+                              type: string
+                            healthCheck:
+                              description: HealthCheckSpec defines how canary health
+                                is evaluated at each step.
+                              properties:
+                                failureThreshold:
+                                  default: 3
+                                  description: |-
+                                    FailureThreshold is the number of consecutive failed checks before
+                                    the controller triggers a rollback (if AutoRollback is true).
+                                  format: int32
+                                  type: integer
+                                httpPath:
+                                  description: |-
+                                    HTTPPath is used when Type == HTTPProbe, evaluated against the
+                                    canary Pods directly.
+                                  type: string
+                                intervalSeconds:
+                                  default: 30
+                                  description: IntervalSeconds between health evaluations.
+                                  format: int64
+                                  type: integer
+                                prometheusQueryExpr:
+                                  description: |-
+                                    PrometheusQueryExpr / PrometheusThreshold are used when
+                                    Type == PrometheusQuery, e.g. checking canary error rate against a
+                                    configured ceiling.
+                                  type: string
+                                prometheusThreshold:
+                                  type: string
+                                type:
+                                  description: |-
+                                    HealthCheckType selects how the rollout controller judges canary health
+                                    at each step before advancing to the next one.
+                                  enum:
+                                  - PodReady
+                                  - HTTPProbe
+                                  - PrometheusQuery
+                                  type: string
+                              required:
+                              - type
+                              type: object
+                            replicas:
+                              description: |-
+                                Replicas is the desired total replica count for the workload. When set
+                                it overrides the runner's default (and any stable Deployment already
+                                present inherits this count). When nil the runner reads the live
+                                stable Deployment's spec.replicas; if that's also unset it falls back
+                                to the historical default of 2 (B-06 — prefer the real replica count
+                                over a hard-coded constant).
+                              format: int32
+                              type: integer
+                            stableImage:
+                              type: string
+                            steps:
+                              description: Steps defines the full progressive delivery
+                                plan, evaluated in order.
+                              items:
+                                description: |-
+                                  CanaryStep is one step of a progressive rollout: shift weight, then
+                                  optionally pause before the controller evaluates health and proceeds.
+                                properties:
+                                  pause:
+                                    description: |-
+                                      Pause holds the rollout at the current weight. Omit both SetWeight
+                                      and Pause is invalid; a step must do at least one of the two.
+                                    properties:
+                                      duration:
+                                        description: |-
+                                          Duration to pause for; if omitted, pause is indefinite until resumed
+                                          externally (e.g. by an operator approving progression, relayed via
+                                          the hub patching Rollout.Spec or a resume annotation).
+                                        type: string
+                                    type: object
+                                  setWeight:
+                                    description: SetWeight is the percentage of traffic
+                                      (0-100) routed to the canary version.
+                                    format: int32
+                                    maximum: 100
+                                    minimum: 0
+                                    type: integer
+                                type: object
+                              minItems: 1
+                              type: array
+                            trafficRouting:
+                              description: |-
+                                TrafficRoutingSpec defines how traffic is actually split between
+                                stable and canary versions of the workload.
+                              properties:
+                                ingressRef:
+                                  description: IngressRef is required when Type ==
+                                    IngressCanary.
+                                  type: string
+                                type:
+                                  description: TrafficRoutingType selects how canary
+                                    traffic is split.
+                                  enum:
+                                  - DeploymentWeight
+                                  - IngressCanary
+                                  type: string
+                              required:
+                              - type
+                              type: object
+                            workloadRef:
+                              description: WorkloadRef is the name of the Deployment
+                                being progressively updated.
+                              type: string
+                          required:
+                          - canaryImage
+                          - healthCheck
+                          - stableImage
+                          - steps
+                          - trafficRouting
+                          - workloadRef
+                          type: object
+                        chart:
+                          description: ChartSource identifies a Helm chart to release.
+                          properties:
+                            name:
+                              description: Name is the chart name (e.g. "nginx").
+                              type: string
+                            repoURL:
+                              description: |-
+                                RepoURL is the Helm repository URL (e.g. https://charts.example.com).
+                                Omit for charts served from the default/cluster-local registry.
+                              type: string
+                            version:
+                              description: Version pins the chart version; empty means
+                                latest.
+                              type: string
+                          required:
+                          - name
+                          type: object
+                        manifest:
+                          description: Manifest is required when Source == Manifest.
+                          properties:
+                            content:
+                              description: Content is one or more YAML documents applied
+                                via `kubectl apply -f -`.
+                              type: string
+                          required:
+                          - content
+                          type: object
+                        source:
+                          description: Source selects Chart vs Manifest application.
+                          type: string
+                        targetNamespace:
+                          description: TargetNamespace overrides the run namespace
+                            for this release.
+                          type: string
+                        values:
+                          additionalProperties:
+                            type: string
+                          description: |-
+                            Values are injected (from the hub's parameter management) as Helm
+                            --set pairs (chart) or object fields (manifest). Kept as a flat
+                            key/value map so the runner stays free of any templating logic.
+                          type: object
+                      required:
+                      - source
+                      type: object
                     repo:
                       description: |-
                         Repo overrides PipelineRunSpec.Repo for this task only; leave nil to
@@ -235,8 +425,8 @@ spec:
                       type: object
                     rolloutSpec:
                       description: |-
-                        RolloutSpec is required when Type == Deploy; the controller creates
-                        a Rollout resource from this template when the task becomes runnable.
+                        RolloutSpec, when set, drives a progressive rollout (canary) for a
+                        Release task instead of a one-shot apply. Ignored for Build/Approval.
                       properties:
                         autoRollback:
                           default: true
@@ -287,6 +477,16 @@ spec:
                           required:
                           - type
                           type: object
+                        replicas:
+                          description: |-
+                            Replicas is the desired total replica count for the workload. When set
+                            it overrides the runner's default (and any stable Deployment already
+                            present inherits this count). When nil the runner reads the live
+                            stable Deployment's spec.replicas; if that's also unset it falls back
+                            to the historical default of 2 (B-06 — prefer the real replica count
+                            over a hard-coded constant).
+                          format: int32
+                          type: integer
                         stableImage:
                           type: string
                         steps:
@@ -380,8 +580,13 @@ spec:
                       description: |-
                         PipelineTaskType defines the category of a task within the DAG.
                         The runner's PipelineRun controller branches its reconcile logic on this field:
-                        Build runs a command (or repo script) inside a tool image; Release applies a
-                        chart/manifest; Approval pauses the pipeline for an external decision.
+                          - Build:    run a command (or repo script) inside a tool image; success/failure
+                            is judged purely by the process exit code. No output inspection.
+                          - Release:  apply a software unit (Helm chart or raw manifest) into the target
+                            cluster, with values injected from the hub's parameter management.
+                            An optional Canary sub-spec drives a progressive rollout.
+                          - Approval: pause the pipeline and wait for an external decision relayed from
+                            the hub.
                       enum:
                       - Build
                       - Release

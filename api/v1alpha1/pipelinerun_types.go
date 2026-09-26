@@ -183,6 +183,11 @@ type PipelineTaskSpec struct {
 	// Usually left empty and derived from Stage instead of set by hand.
 	DependsOn []string `json:"dependsOn,omitempty"`
 
+	// Privileged (G-4) runs the task container with
+	// securityContext.privileged=true so docker-in-docker /
+	// containerd-in-containerd build images work. Opt-in per task.
+	Privileged bool `json:"privileged,omitempty"`
+
 	RetryPolicy *RetryPolicy `json:"retryPolicy,omitempty"`
 
 	// TimeoutSeconds bounds how long the corresponding TaskRun may run

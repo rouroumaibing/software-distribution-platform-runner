@@ -2,9 +2,20 @@
 // this is where the design discussed for script-based task execution
 // (git checkout + artifact download as init containers, `sh {ScriptPath}
 // {ScriptArgs...}` as the main container) actually gets built.
+//
+// 2026-09-26 E2E 补齐批次：
+//   - G-5（runner 半边）：run params 注入为容器 env（裸 $KEY 引用）；
+//     hub 半边在触发时做 ${KEY} 文本替换，两者互补。
+//   - G-6：consume init 容器真实化 —— 调 hub `POST /artifacts/storage-url`
+//     签发 GET URL 并下载到 workspace（此前只 echo 占位）。
+//   - G-7：四个默认 job 镜像全部可经 JobBuilder 字段 / runner env 覆盖
+//     （受限 registry 环境开箱即败 → 换成私有 mirror 镜像即可）。
+//   - G-4：Privileged 任务容器以 privileged=true 运行（dind/cind 构建镜像）。
 package executor
 
 import (
+	"regexp"
+
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -15,17 +26,34 @@ import (
 const workspaceMountPath = "/workspace"
 
 // standard images used for the plumbing init containers; overridable via
-// JobBuilder fields so a self-hosted registry mirror can be swapped in
-// without touching call sites.
+// JobBuilder fields (wired from SDP_JOB_IMAGE_* env in cmd/runner/main.go)
+// so a self-hosted registry mirror can be swapped in without touching call
+// sites (G-7).
 const (
-	defaultGitImage      = "alpine/git:2.45.2"
-	defaultArtifactImage = "amazon/aws-cli:2.17.0" // 占位:换成实际的对象存储 CLI/自研小工具镜像
+	// DefaultGitImage / DefaultArtifactImage / DefaultHelmImage /
+	// DefaultKubectlImage are exported so cmd/runner can wire env overrides
+	// without this package importing os (G-7: all four are overridable via
+	// SDP_JOB_IMAGE_* runner env).
+	DefaultGitImage      = "alpine/git:2.45.2"
+	DefaultArtifactImage = "curlimages/curl:8.8.0" // G-6：consume 需要 curl + sh
 
-	// defaultReleaseImage* are placeholders; swap for the org's pinned
+	// DefaultReleaseImage* are placeholders; swap for the org's pinned
 	// helm/kubectl images (or a self-built release tool) before production.
-	defaultHelmImage    = "alpine/helm:3.14.4"
-	defaultKubectlImage = "bitnami/kubectl:1.30" // 占位:换成实际 kubectl 镜像
+	DefaultHelmImage    = "alpine/helm:3.14.4"
+	DefaultKubectlImage = "bitnami/kubectl:1.30" // 占位:换成实际 kubectl 镜像
 )
+
+// reservedEnv is the denylist for plain-name param → env injection (G-5):
+// a user param named PATH/HOME/LD_PRELOAD would break or escalate inside the
+// task container, so those names are skipped (use ${KEY} hub substitution or
+// a prefixed name instead).
+var reservedEnv = map[string]bool{
+	"PATH": true, "HOME": true, "SHELL": true, "PWD": true, "IFS": true,
+	"LD_PRELOAD": true, "LD_LIBRARY_PATH": true, "PYTHONPATH": true,
+	"KUBERNETES_SERVICE_HOST": true, "KUBERNETES_SERVICE_PORT": true,
+}
+
+var envNameRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 // JobBuilder assembles the batchv1.Job for a single TaskRun. Kept as a
 // struct (not a bare function) so cluster-specific defaults — registry
@@ -34,13 +62,24 @@ const (
 type JobBuilder struct {
 	GitImage      string
 	ArtifactImage string
-	// ArtifactStoreEndpoint is passed to the artifact-download init
-	// container via env var; TODO: 换成真正的对象存储 SDK 调用方式。
-	ArtifactStoreEndpoint string
+	HelmImage     string
+	KubectlImage  string
+	// HubBaseURL is the hub API base reachable from job pods (e.g.
+	// http://hub.sdp-workflow.svc:8080). Required for artifact upload
+	// (archive scripts call the hub themselves) and consume downloads.
+	HubBaseURL string
+	// HubAPIToken is an optional bearer token for hub API calls from job
+	// containers; empty is fine when the hub runs with auth disabled.
+	HubAPIToken string
 }
 
 func NewJobBuilder() *JobBuilder {
-	return &JobBuilder{GitImage: defaultGitImage, ArtifactImage: defaultArtifactImage}
+	return &JobBuilder{
+		GitImage:      DefaultGitImage,
+		ArtifactImage: DefaultArtifactImage,
+		HelmImage:     DefaultHelmImage,
+		KubectlImage:  DefaultKubectlImage,
+	}
 }
 
 // Build constructs the Job for tr. Callers are expected to
@@ -54,7 +93,7 @@ func (b *JobBuilder) Build(tr *sdpv1alpha1.TaskRun) *batchv1.Job {
 		initContainers = append(initContainers, b.checkoutContainer(tr.Spec.Repo))
 	}
 	if len(tr.Spec.Consumes) > 0 {
-		initContainers = append(initContainers, b.consumeContainer(tr.Spec.Consumes))
+		initContainers = append(initContainers, b.consumeContainer(tr.Spec.Consumes, tr.Spec.Params))
 	}
 
 	// A Release task with a canary sub-spec is owned by the Rollout
@@ -133,24 +172,80 @@ func (b *JobBuilder) checkoutContainer(repo *sdpv1alpha1.RepoSource) corev1.Cont
 	return c
 }
 
-// consumeContainer downloads every artifact key in Consumes from the
-// central object store into the workspace, so ScriptPath can read them as
-// plain local files. TODO: 换成真正的对象存储 CLI/自研小工具镜像和调用方式,
-// 这里先用环境变量把要拉取的 key 列表传进去占位。
-func (b *JobBuilder) consumeContainer(consumes []string) corev1.Container {
+// consumeFetchScript downloads every key in $ARTIFACT_KEYS (comma-separated)
+// into $SDP_ARTIFACT_DIR via the hub's signed storage-URL endpoint (G-6).
+// Consumed with a curl-capable image (default curlimages/curl).
+const consumeFetchScript = `set -e
+mkdir -p "$SDP_ARTIFACT_DIR"
+OLDIFS="$IFS"; IFS=','
+for key in $ARTIFACT_KEYS; do
+  IFS="$OLDIFS"
+  [ -n "$key" ] || continue
+  if [ -n "$SDP_HUB_TOKEN" ]; then
+    RESP=$(curl -sf -X POST "$SDP_HUB_BASE_URL/api/v1/artifacts/storage-url" \
+      -H "Content-Type: application/json" \
+      -H "Authorization: Bearer $SDP_HUB_TOKEN" \
+      -d "{\"key\":\"$key\"}")
+  else
+    RESP=$(curl -sf -X POST "$SDP_HUB_BASE_URL/api/v1/artifacts/storage-url" \
+      -H "Content-Type: application/json" \
+      -d "{\"key\":\"$key\"}")
+  fi
+  [ -n "$RESP" ] || { echo "storage-url request failed for $key" >&2; exit 1; }
+  URL=$(printf '%s' "$RESP" | sed -n 's/.*"url":"\([^"]*\)".*/\1/p')
+  [ -n "$URL" ] || { echo "no url in response for $key: $RESP" >&2; exit 1; }
+  OUT="$SDP_ARTIFACT_DIR/$(basename "$key")"
+  curl -fsSL -o "$OUT" "$URL" || { echo "download failed for $key" >&2; exit 1; }
+  echo "fetched $key -> $OUT ($(wc -c < "$OUT") bytes)"
+done
+`
+
+// consumeContainer downloads every artifact key in Consumes from the object
+// store into the workspace, so the main container can read them as plain
+// local files (G-6: was an echo placeholder).
+func (b *JobBuilder) consumeContainer(consumes []string, params []sdpv1alpha1.Param) corev1.Container {
+	env := []corev1.EnvVar{
+		{Name: "ARTIFACT_KEYS", Value: joinComma(consumes)},
+		{Name: "SDP_ARTIFACT_DIR", Value: workspaceMountPath},
+		{Name: "SDP_HUB_BASE_URL", Value: b.HubBaseURL},
+	}
+	if b.HubAPIToken != "" {
+		env = append(env, corev1.EnvVar{Name: "SDP_HUB_TOKEN", Value: b.HubAPIToken})
+	}
+	// Params can feed the download script too (e.g. ${KEY} already resolved
+	// hub-side; plain $VERSION still works here).
+	env = append(env, paramsToEnv(params)...)
+	env = append(env, corev1.EnvVar{
+		Name:  "AUTH_HEADER",
+		Value: "",
+	})
+	if b.HubAPIToken != "" {
+		env[len(env)-1] = corev1.EnvVar{Name: "AUTH_HEADER", Value: "-H \"Authorization: Bearer $SDP_HUB_TOKEN\""}
+	}
 	return corev1.Container{
 		Name:    "fetch-artifacts",
 		Image:   b.ArtifactImage,
-		Command: []string{"sh", "-c", "echo fetching artifacts: $ARTIFACT_KEYS"},
-		Env: []corev1.EnvVar{
-			{Name: "ARTIFACT_KEYS", Value: joinComma(consumes)},
-			{Name: "ARTIFACT_STORE_ENDPOINT", Value: b.ArtifactStoreEndpoint},
-			{Name: "SDP_ARTIFACT_DIR", Value: workspaceMountPath},
-		},
+		Command: []string{"sh", "-c", consumeFetchScript},
+		Env:     env,
 		VolumeMounts: []corev1.VolumeMount{
 			{Name: "workspace", MountPath: workspaceMountPath},
 		},
 	}
+}
+
+// paramsToEnv converts run params into container env vars (G-5, runner half).
+// Only shell-safe names are injected; reserved names are skipped so a param
+// can never clobber PATH/HOME or inject loader settings. The hub-side ${KEY}
+// substitution covers arbitrary names.
+func paramsToEnv(params []sdpv1alpha1.Param) []corev1.EnvVar {
+	var env []corev1.EnvVar
+	for _, p := range params {
+		if p.Name == "" || !envNameRe.MatchString(p.Name) || reservedEnv[p.Name] {
+			continue
+		}
+		env = append(env, corev1.EnvVar{Name: p.Name, Value: p.Value})
+	}
+	return env
 }
 
 // mainContainer runs `sh {ScriptPath} {ScriptArgs...}` from the workspace,
@@ -169,9 +264,11 @@ func (b *JobBuilder) mainContainer(tr *sdpv1alpha1.TaskRun) corev1.Container {
 		{Name: "SDP_PIPELINE_RUN", Value: tr.Spec.PipelineRunRef},
 		{Name: "SDP_TASK_NAME", Value: tr.Spec.TaskName},
 		{Name: "SDP_ARTIFACT_DIR", Value: workspaceMountPath},
+		{Name: "SDP_HUB_BASE_URL", Value: b.HubBaseURL},
 	}, tr.Spec.Env...)
+	env = append(env, paramsToEnv(tr.Spec.Params)...)
 
-	return corev1.Container{
+	c := corev1.Container{
 		Name:         "main",
 		Image:        tr.Spec.Image,
 		Command:      command,
@@ -181,6 +278,8 @@ func (b *JobBuilder) mainContainer(tr *sdpv1alpha1.TaskRun) corev1.Container {
 		WorkingDir:   workspaceMountPath,
 		VolumeMounts: []corev1.VolumeMount{{Name: "workspace", MountPath: workspaceMountPath}},
 	}
+	applyPrivileged(&c, tr.Spec.Privileged)
+	return c
 }
 
 // releaseContainer applies a software unit (Helm chart or raw manifest) into
@@ -188,6 +287,8 @@ func (b *JobBuilder) mainContainer(tr *sdpv1alpha1.TaskRun) corev1.Container {
 // passed as `helm --set` pairs (chart) or an env var piped to `kubectl apply`
 // (manifest). The release name defaults to the task name (sanitized); the
 // runner never templates the chart itself — it only forwards the values.
+// `${KEY}` placeholders were already expanded hub-side (G-5); run params are
+// additionally injected as env for shell-level references.
 func (b *JobBuilder) releaseContainer(tr *sdpv1alpha1.TaskRun) corev1.Container {
 	spec := tr.Spec.ReleaseSpec
 	if spec == nil {
@@ -195,7 +296,7 @@ func (b *JobBuilder) releaseContainer(tr *sdpv1alpha1.TaskRun) corev1.Container 
 		// command that fails fast so the TaskRun records a clean Failed.
 		return corev1.Container{
 			Name:  "release",
-			Image: defaultHelmImage,
+			Image: b.HelmImage,
 			Command: []string{"sh", "-c",
 				"echo 'release task missing ReleaseSpec' >&2; exit 1"},
 			WorkingDir:   workspaceMountPath,
@@ -215,18 +316,22 @@ func (b *JobBuilder) releaseContainer(tr *sdpv1alpha1.TaskRun) corev1.Container 
 		if spec.Manifest != nil {
 			content = spec.Manifest.Content
 		}
-		return corev1.Container{
+		env := []corev1.EnvVar{
+			{Name: "SDP_MANIFEST", Value: content},
+			{Name: "SDP_RELEASE_NS", Value: ns},
+		}
+		env = append(env, paramsToEnv(tr.Spec.Params)...)
+		c := corev1.Container{
 			Name:  "release",
-			Image: firstNonEmpty(tr.Spec.Image, defaultKubectlImage),
+			Image: firstNonEmpty(tr.Spec.Image, b.KubectlImage),
 			Command: []string{"sh", "-c",
 				`printf '%s' "$SDP_MANIFEST" | kubectl apply -f - --namespace "$SDP_RELEASE_NS"`},
-			Env: []corev1.EnvVar{
-				{Name: "SDP_MANIFEST", Value: content},
-				{Name: "SDP_RELEASE_NS", Value: ns},
-			},
+			Env:          env,
 			WorkingDir:   workspaceMountPath,
 			VolumeMounts: []corev1.VolumeMount{{Name: "workspace", MountPath: workspaceMountPath}},
 		}
+		applyPrivileged(&c, tr.Spec.Privileged)
+		return c
 	default: // ReleaseSourceChart (and unspecified → chart)
 		chart := ""
 		if spec.Chart != nil {
@@ -248,14 +353,26 @@ func (b *JobBuilder) releaseContainer(tr *sdpv1alpha1.TaskRun) corev1.Container 
 		for k, v := range spec.Values {
 			cmd = append(cmd, "--set", k+"="+v)
 		}
-		return corev1.Container{
+		c := corev1.Container{
 			Name:         "release",
-			Image:        firstNonEmpty(tr.Spec.Image, defaultHelmImage),
+			Image:        firstNonEmpty(tr.Spec.Image, b.HelmImage),
 			Command:      cmd,
 			WorkingDir:   workspaceMountPath,
 			VolumeMounts: []corev1.VolumeMount{{Name: "workspace", MountPath: workspaceMountPath}},
 		}
+		applyPrivileged(&c, tr.Spec.Privileged)
+		return c
 	}
+}
+
+// applyPrivileged opts the container into privileged mode (G-4) — required
+// by docker-in-docker / containerd-in-containerd build images.
+func applyPrivileged(c *corev1.Container, privileged bool) {
+	if !privileged {
+		return
+	}
+	priv := true
+	c.SecurityContext = &corev1.SecurityContext{Privileged: &priv}
 }
 
 // sanitizeReleaseName makes a task name safe to use as a Helm release name

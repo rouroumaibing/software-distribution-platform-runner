@@ -123,6 +123,13 @@ func (r *PipelineRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 	// 找出依赖已全部 Succeeded、但还没创建 TaskRun 的节点,批量创建。
 	runnable := findRunnableTasks(pr.Spec.Tasks, existingByName)
+	// G-1：运行命名空间内幂等 ensure 执行 SA + 最小部署 Role/RoleBinding，
+	// 让 Release/Build Job 开箱即有部署权限（此前靠手工 SA shim）。
+	if len(runnable) > 0 {
+		if err := ensureRunRBAC(ctx, r.Client, pr.Spec.TargetNamespace, pr.Spec.ServiceAccountName); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
 	for _, task := range runnable {
 		tr := buildTaskRun(&pr, task)
 		if err := controllerutil.SetControllerReference(&pr, tr, r.Scheme()); err != nil {
@@ -299,6 +306,14 @@ func buildTaskRun(pr *sdpv1alpha1.PipelineRun, task sdpv1alpha1.PipelineTaskSpec
 			TimeoutSeconds:     task.TimeoutSeconds,
 			ApprovalConfig:     task.ApprovalConfig,
 			RolloutSpec:        task.RolloutSpec,
+			// G-9 修复（2026-09-26 E2E）：此前漏拷 ReleaseSpec —— 普通（非
+			// canary）Release 任务的 TaskRun 无 ReleaseSpec，Job 必然以
+			// "release task missing ReleaseSpec" 失败，Release 类型整体不可用。
+			ReleaseSpec: task.ReleaseSpec,
+			// G-5（runner 半边）：run 级参数注入 TaskRun，Job 构建时转成
+			// 容器 env；G-4：特权模式透传（dind/cind 构建镜像）。
+			Params:     pr.Spec.Params,
+			Privileged: task.Privileged,
 		},
 	}
 }

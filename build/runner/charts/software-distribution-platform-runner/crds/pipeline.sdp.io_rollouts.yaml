@@ -104,6 +104,16 @@ spec:
                 required:
                 - type
                 type: object
+              replicas:
+                description: |-
+                  Replicas is the desired total replica count for the workload. When set
+                  it overrides the runner's default (and any stable Deployment already
+                  present inherits this count). When nil the runner reads the live
+                  stable Deployment's spec.replicas; if that's also unset it falls back
+                  to the historical default of 2 (B-06 — prefer the real replica count
+                  over a hard-coded constant).
+                format: int32
+                type: integer
               stableImage:
                 type: string
               steps:

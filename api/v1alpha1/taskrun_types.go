@@ -72,6 +72,16 @@ type TaskRunSpec struct {
 	// ReleaseSpec is populated when Type == Release; describes the chart or
 	// manifest to apply, plus values injected from parameter management.
 	ReleaseSpec *ReleaseSpec `json:"releaseSpec,omitempty"`
+
+	// Params (G-5, runner 半边) are the run's parameters, injected as
+	// environment variables into the task's containers so shell scripts can
+	// reference plain $KEY. The hub-side half expands ${KEY} in the spec
+	// before dispatch; this covers references the hub cannot see.
+	Params []Param `json:"params,omitempty"`
+
+	// Privileged (G-4) runs the task container with
+	// securityContext.privileged=true (dind/cind build images).
+	Privileged bool `json:"privileged,omitempty"`
 }
 
 // TaskRunStatus defines the observed state of a TaskRun.

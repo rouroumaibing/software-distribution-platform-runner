@@ -29,13 +29,18 @@ rules:
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["create", "get", "list", "watch"]
-  # Rollout 控制工作负载。
+  # Rollout 控制工作负载 + G-1 ensureRunRBAC：runner 要把部署权限授予执行 SA，
+  # K8s 特权提升防护要求**先持有**才能授予（否则 create Role/RoleBinding 直接
+  # 403："attempting to grant RBAC permissions not currently held"）。
   - apiGroups: ["apps"]
     resources: ["deployments"]
-    verbs: ["get", "list", "watch", "patch", "update"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: [""]
-    resources: ["services"]
-    verbs: ["get", "list", "watch"]
+    resources: ["services", "configmaps", "secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "pods/status"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   # Rollout 的 canary Ingress（B-04）：RolloutReconciler Owns(&networkingv1.Ingress{})，
   # 控制器缓存必须 list/watch 该资源，否则 Ingress informer 永不 sync →
   # manager.WaitForCacheSync 超时、runner 起不来（表现为 rollout/pipelinerun
@@ -48,6 +53,14 @@ rules:
   # informer 同步，缺权限会导致 handler 永久阻塞、readLoop 卡死）。
   - apiGroups: [""]
     resources: ["namespaces"]
+    verbs: ["get", "list", "watch", "create"]
+  # G-1（2026-09-26）：ensureRunRBAC 在运行命名空间幂等创建执行 SA + 最小部署
+  # Role/RoleBinding，让 Release/Build Job 开箱即有部署权限（此前靠手工 shim）。
+  - apiGroups: [""]
+    resources: ["serviceaccounts"]
+    verbs: ["get", "list", "watch", "create"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings"]
     verbs: ["get", "list", "watch", "create"]
   # leader election（LEADER_ELECTION=true 时用，平时无害）。
   - apiGroups: ["coordination.k8s.io"]

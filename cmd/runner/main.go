@@ -14,6 +14,8 @@ import (
 	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	sdpv1alpha1 "github.com/rouroumaibing/software-distribution-platform-runner/api/v1alpha1"
 	"github.com/rouroumaibing/software-distribution-platform-runner/internal/agentops"
@@ -33,6 +35,11 @@ import (
 const maxManagerStartAttempts = 10
 
 func main() {
+	// controller-runtime 的 reconciler 错误（含 Reconciler error 重试日志）走
+	// 其自身 logger —— 不 SetLogger 会被 delegating logger 静默丢弃（2026-09-26
+	// 排查 ensureRunRBAC 卡点时实测：错误完全不可见）。zap dev 模式接上即可。
+	logf.SetLogger(zap.New(zap.UseDevMode(true)))
+
 	scheme := clientgoscheme.Scheme
 	utilruntime.Must(sdpv1alpha1.AddToScheme(scheme))
 
@@ -78,7 +85,16 @@ func main() {
 	}
 	conn.OnMessage(connector.MessageAgentOp, agentOpHandler.Handle)
 
-	jobBuilder := executor.NewJobBuilder()
+	// G-7：job 内使用的默认镜像全部可经 env 覆盖（受限 registry / 私有 mirror
+	// 环境不再开箱即败）。G-6：consume 需要 hub API 地址与可选 token。
+	jobBuilder := &executor.JobBuilder{
+		GitImage:      envOr("SDP_JOB_IMAGE_GIT", executor.DefaultGitImage),
+		ArtifactImage: envOr("SDP_JOB_IMAGE_ARTIFACT", executor.DefaultArtifactImage),
+		HelmImage:     envOr("SDP_JOB_IMAGE_HELM", executor.DefaultHelmImage),
+		KubectlImage:  envOr("SDP_JOB_IMAGE_KUBECTL", executor.DefaultKubectlImage),
+		HubBaseURL:    envOr("SDP_HUB_BASE_URL", "http://hub.sdp-workflow.svc:8080"),
+		HubAPIToken:   os.Getenv("SDP_HUB_API_TOKEN"),
+	}
 
 	// startManager builds a fresh controller-runtime manager, (re)wires the
 	// Hub -> Runner message handlers against that manager's client, registers

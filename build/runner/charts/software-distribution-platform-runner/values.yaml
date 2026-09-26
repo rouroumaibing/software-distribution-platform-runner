@@ -25,3 +25,16 @@ gateway:
 target:
   name: local-dev
   authToken: sdp-dev-token-2026
+
+# G-7：执行 Job 的四个默认镜像可按环境覆盖（受限 registry 换成私有 mirror 即可）；
+# G-6：consume init 容器走 hub API 下载产物 —— hubApi.url 必须是 job Pod 可达的
+# 地址，hubApi.token 为可选的 Bearer（hub 关闭鉴权时留空）。
+jobImages:
+  git: alpine/git:2.45.2
+  artifact: curlimages/curl:8.8.0
+  helm: alpine/helm:3.14.4
+  kubectl: bitnami/kubectl:1.30
+
+hubApi:
+  url: http://hub.sdp-workflow.svc:8080
+  token: ""

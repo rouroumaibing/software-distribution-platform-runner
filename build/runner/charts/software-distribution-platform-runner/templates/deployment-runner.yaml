@@ -30,6 +30,19 @@ spec:
               value: {{ .Values.target.name }}
             - name: TARGET_AUTH_TOKEN
               value: {{ .Values.target.authToken }}
+            # G-7：job 默认镜像可按环境覆盖；G-6：consume 下载走 hub API。
+            - name: SDP_JOB_IMAGE_GIT
+              value: {{ .Values.jobImages.git }}
+            - name: SDP_JOB_IMAGE_ARTIFACT
+              value: {{ .Values.jobImages.artifact }}
+            - name: SDP_JOB_IMAGE_HELM
+              value: {{ .Values.jobImages.helm }}
+            - name: SDP_JOB_IMAGE_KUBECTL
+              value: {{ .Values.jobImages.kubectl }}
+            - name: SDP_HUB_BASE_URL
+              value: {{ .Values.hubApi.url }}
+            - name: SDP_HUB_API_TOKEN
+              value: {{ .Values.hubApi.token }}
           image: {{ .Values.image.imageAddr }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           resources:
