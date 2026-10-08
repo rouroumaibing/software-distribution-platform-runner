@@ -8,7 +8,7 @@
 - **构建产物统一落在 `output/` 下**（`make build` 的 `output/bin/runner`、`make package` 的 `output/{charts,images}/` 与交付包），清理即一条 `rm -rf output`；
 - `package` 产物（交付包）默认版本 `v0.0.1`；
 - **起服务**：`make start-dev`（后台运行，pid 文件 + 进程组管理）→ `make stop-dev`；产出镜像 / 交付包用 `make package`；
-- controller-gen 生成文件（`api/v1alpha1/zz_generated.deepcopy.go`、`config/crd/bases/*.yaml`、`config/rbac/*.yaml`）属构建/打包输入，**clean 不删、保留**；同一规则的还有 hub 的 swaggo docs（`docs/{docs.go,swagger.json,swagger.yaml}`：已入库、clean 默认保留，见 hub README「swaggo API 文档」）。
+- controller-gen 生成文件（`api/v1alpha1/zz_generated.deepcopy.go`、`config/crd/bases/*.yaml`）属构建/打包输入，**clean 不删、保留**；`config/rbac/` 目录当前仅存 `.gitkeep`（无 RBAC 清单，集群侧 RBAC 实际由 chart 承担），同样保留；同一规则的还有 hub 的 swaggo docs（`docs/{docs.go,swagger.json,swagger.yaml}`：已入库、clean 默认保留，见 hub README「swaggo API 文档」）。
 
 | make target | 作用 |
 | --- | --- |
@@ -22,13 +22,13 @@
 
 ## 行为要点（接入侧代理）
 
-- **无入站 HTTP**：runner 出站回连 hub 的 WS 网关（`/gateway/ws`，`GATEWAY_TOKEN` 认证），断线按指数退避重连；**D-01**：重连后 informer cache sync 超时（约 2 分钟）会**主动退出**交由容器重启兜底——hub 多次重启窗口期可能出现短暂 CrashLoopBackOff，属设计行为，pod 重建即恢复。
+- **无入站 HTTP**：runner 出站回连 hub 的 WS 网关（`/gateway/ws`，`TARGET_AUTH_TOKEN` 认证——注意 hub 侧另有 `GATEWAY_TOKEN` 环境变量，属 hub 组件配置，勿与 runner 侧混用），断线按指数退避重连；**D-01（resilient start）**：manager 启动失败按指数退避重试至多 10 次（1s 起、30s 封顶）才 fatal 退出（`cmd/runner/main.go` `maxManagerStartAttempts`），websocket 短暂断连绝不触发 manager 重建；仅当 manager 持续无法启动（如 CRD 被删、RBAC 被回收）才退出进入 CrashLoopBackOff。另：chart values 中 `gateway.token` 为死配置（模板未引用，认证实际取 `TARGET_AUTH_TOKEN` 环境变量）。
 - **自身不执行任务**：把 hub 下发的 spec 翻译成目标集群里的 K8s Job（`pkg/executor/job_builder.go`：EmptyDir 工作区 + main/release 容器跑脚本 / `helm upgrade --install` / `kubectl apply`）；只消费 hub 已鉴权下发的 spec，自身无授权逻辑（集群侧权限由 k8s RBAC 约束，见 docs 仓 runner Story §4.4）。
 - **任务类型**：`Build` / `Test` / `Release` / `Approval`（`api/v1alpha1/pipelinerun_types.go` 枚举校验；controller 按类型分支 reconcile）。
 
 ## 设计文档
 
-本组件的设计文档（实现 Story、kubebuilder 安装、任务处理与 DAG 推进、授权边界等）已统一收敛到独立的 [`software-distribution-platform-docs`](https://github.com/rouroumaibing/software-distribution-platform-docs) 仓库（单一真源），本仓库不再存放设计文档正文。
+本组件的设计文档（实现 Story、kubebuilder 安装、任务处理与 DAG 推进、授权边界等）统一存放在独立的 [`software-distribution-platform-docs`](https://github.com/rouroumaibing/software-distribution-platform-docs) 仓库（单一真源），本仓库只保留指针、不存放设计文档正文（避免双份权威与内容漂移）。
 
 - 实现 Story：[`runner/STORY-runner-implementation.md`](https://github.com/rouroumaibing/software-distribution-platform-docs/blob/main/runner/STORY-runner-implementation.md)
 - 跨组件对齐（整体目标 / 授权模型 G7 / 执行模型）：见 docs 仓库 [`README.md` §5](https://github.com/rouroumaibing/software-distribution-platform-docs/blob/main/README.md)

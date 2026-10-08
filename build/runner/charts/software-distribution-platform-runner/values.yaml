@@ -7,7 +7,7 @@ basic:
   replicaCount: 1
 
 image:
-  imageAddr: localhost:5000/software-distribution-platform-runner:v0.0.1
+  imageAddr: harbor.sdpworkflow.com/sdp/software-distribution-platform-runner:v0.0.1
   pullPolicy: Always
 
 resources:
@@ -21,10 +21,15 @@ gateway:
   url: ws://hub.sdp-workflow.svc:8080/gateway/ws
   token: sdp-dev-token-2026
 
-# runner 需先在 hub 注册同名目标（POST /api/v1/targets），token 与其一致
+# target 对接信息（ADR-0001 首连自注册）：vendor/region 都非空时，runner 每次拨号
+# 把它们随 X-Target-Vendor/X-Target-Region 透传，hub 在持有合法 gateway token 的前提
+# 下对未注册 target 自动建行（GitLab-Runner 式安装即注册）——无需再手工 POST /targets。
+# 仅 name+authToken（vendor/region 置空）= 旧行为：未注册直接 404，重试待人工注册。
 target:
   name: local-dev
   authToken: sdp-dev-token-2026
+  vendor: kind
+  region: local
 
 # G-7：执行 Job 的四个默认镜像可按环境覆盖（受限 registry 换成私有 mirror 即可）；
 # G-6：consume init 容器走 hub API 下载产物 —— hubApi.url 必须是 job Pod 可达的

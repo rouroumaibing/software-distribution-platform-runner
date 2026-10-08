@@ -54,6 +54,13 @@ type Client struct {
 	targetName string
 	authToken  string // Target registration token, rotated periodically — see hub's targets table.
 
+	// Enrollment attributes (ADR-0001 bootstrap-on-first-connect): when both
+	// are non-empty they ride every dial as X-Target-Vendor/X-Target-Region,
+	// letting the Hub auto-create a not-yet-registered target. Empty means
+	// "plain connect" — an unknown target then fails loudly with 404.
+	vendor string
+	region string
+
 	handlers  map[runnerapi.MessageType]Handler
 	onConnect OnConnectFunc
 
@@ -69,6 +76,14 @@ func New(hubURL, targetName, authToken string) *Client {
 		handlers:   make(map[MessageType]Handler),
 		outbox:     make(chan Message, 256),
 	}
+}
+
+// WithEnrollInfo sets the target registry attributes carried on every dial
+// (hub auto-enrolls an unknown target that presents them alongside a valid
+// gateway token). Returns the receiver for chaining at the call site.
+func (c *Client) WithEnrollInfo(vendor, region string) *Client {
+	c.vendor, c.region = vendor, region
+	return c
 }
 
 // OnMessage registers a handler for an inbound message type.
@@ -124,6 +139,10 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 	header := map[string][]string{
 		"Authorization": {"Bearer " + c.authToken},
 		"X-Target-Name": {c.targetName},
+	}
+	if c.vendor != "" && c.region != "" {
+		header["X-Target-Vendor"] = []string{c.vendor}
+		header["X-Target-Region"] = []string{c.region}
 	}
 	conn, _, err := websocket.DefaultDialer.DialContext(ctx, c.hubURL, header)
 	if err != nil {

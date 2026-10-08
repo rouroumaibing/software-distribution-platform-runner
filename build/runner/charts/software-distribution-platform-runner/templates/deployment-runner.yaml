@@ -30,6 +30,12 @@ spec:
               value: {{ .Values.target.name }}
             - name: TARGET_AUTH_TOKEN
               value: {{ .Values.target.authToken }}
+            # ADR-0001 首连自注册：两者都非空时随每次拨号透传（X-Target-Vendor/Region），
+            # hub 对未注册 target 自动建行；置空则保持严格的 404-on-unknown 行为。
+            - name: TARGET_VENDOR
+              value: {{ .Values.target.vendor | quote }}
+            - name: TARGET_REGION
+              value: {{ .Values.target.region | quote }}
             # G-7：job 默认镜像可按环境覆盖；G-6：consume 下载走 hub API。
             - name: SDP_JOB_IMAGE_GIT
               value: {{ .Values.jobImages.git }}

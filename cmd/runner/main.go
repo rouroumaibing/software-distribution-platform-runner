@@ -59,6 +59,13 @@ func main() {
 		targetName,
 		mustEnv("TARGET_AUTH_TOKEN"),
 	)
+	// ADR-0001 bootstrap-on-first-connect: when the deployment carries the
+	// target registry attributes, every dial offers them so the Hub can
+	// auto-enroll a not-yet-registered target on first connect. Both must be
+	// set to take effect; omitting them keeps the strict 404-on-unknown path.
+	if vendor, region := os.Getenv("TARGET_VENDOR"), os.Getenv("TARGET_REGION"); vendor != "" && region != "" {
+		conn.WithEnrollInfo(vendor, region)
+	}
 
 	// Typed clientset is needed to stream pod logs (controller-runtime's
 	// client can't tail logs) for the B-02 live-log feature. Built once from
@@ -86,7 +93,7 @@ func main() {
 	conn.OnMessage(connector.MessageAgentOp, agentOpHandler.Handle)
 
 	// G-7：job 内使用的默认镜像全部可经 env 覆盖（受限 registry / 私有 mirror
-	// 环境不再开箱即败）。G-6：consume 需要 hub API 地址与可选 token。
+	// 环境下可换用可用镜像源，避免开箱即败）。G-6：consume 需要 hub API 地址与可选 token。
 	jobBuilder := &executor.JobBuilder{
 		GitImage:      envOr("SDP_JOB_IMAGE_GIT", executor.DefaultGitImage),
 		ArtifactImage: envOr("SDP_JOB_IMAGE_ARTIFACT", executor.DefaultArtifactImage),
