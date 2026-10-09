@@ -34,13 +34,20 @@ const (
 	// DefaultKubectlImage are exported so cmd/runner can wire env overrides
 	// without this package importing os (G-7: all four are overridable via
 	// SDP_JOB_IMAGE_* runner env).
-	DefaultGitImage      = "alpine/git:2.45.2"
-	DefaultArtifactImage = "curlimages/curl:8.8.0" // G-6：consume 需要 curl + sh
+	//
+	// STATUS #22①（2026-10-08）：默认镜像入 harbor。项目内统一用扁平命名
+	// `harbor.sdpworkflow.com/sdp/<名>:<tag>`（映射：alpine/git→git、
+	// curlimages/curl→curl、alpine/helm→helm、bitnami/kubectl→kubectl），
+	// 与平台三组件镜像（harbor.sdpworkflow.com/sdp/hub 等）同一 project。
+	// 镜像由部署脚本先 push 进 harbor；节点 containerd mirror 也指向 harbor。
+	// 离线/受限 registry 环境仍可用 SDP_JOB_IMAGE_* 覆盖（G-7 语义不变）。
+	DefaultGitImage      = "harbor.sdpworkflow.com/sdp/git:2.45.2"
+	DefaultArtifactImage = "harbor.sdpworkflow.com/sdp/curl:8.8.0" // G-6：consume 需要 curl + sh
 
 	// DefaultReleaseImage* are placeholders; swap for the org's pinned
 	// helm/kubectl images (or a self-built release tool) before production.
-	DefaultHelmImage    = "alpine/helm:3.14.4"
-	DefaultKubectlImage = "bitnami/kubectl:1.30" // 占位:换成实际 kubectl 镜像
+	DefaultHelmImage    = "harbor.sdpworkflow.com/sdp/helm:3.14.4"
+	DefaultKubectlImage = "harbor.sdpworkflow.com/sdp/kubectl:1.30"
 )
 
 // reservedEnv is the denylist for plain-name param → env injection (G-5):

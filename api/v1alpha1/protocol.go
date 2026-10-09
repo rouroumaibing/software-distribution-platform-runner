@@ -40,6 +40,12 @@ const (
 	// (stdout/stderr); the hub persists it for replay and fans it out to SSE
 	// subscribers.
 	MessageAgentOpLog MessageType = "agent_op_log"
+	// MessageAgentInfo is the one-shot identity frame the Runner sends on
+	// every (re)connect (RUNNER-REFLUX-SPEC §5): it self-reports the binary
+	// version, platform and capabilities so the hub can persist
+	// targets.agent_version and later gate on version compatibility. The hub
+	// ignores unknown/old runners' absence of this frame (backward compat).
+	MessageAgentInfo MessageType = "agent_info"
 )
 
 // Message is the envelope for every frame on the connection: a typed

@@ -137,9 +137,14 @@ const (
 	AgentOpStreamStdout    = "stdout"
 	AgentOpStreamStderr    = "stderr"
 
-	// AgentOpTypeExec is the only op type dispatched to the Runner today
-	// (§16.5 裁定); install/upgrade await the §9.9 bootstrap flow.
+	// AgentOpTypeExec is the primary op dispatched to the Runner (§16.5):
+	// run a command/script in the target cluster as a Job.
 	AgentOpTypeExec = "exec"
+	// AgentOpTypeUpgrade self-upgrades the Runner binary itself
+	// (INSTALL-UPGRADE-EXECUTOR-DESIGN): Detail carries the target version;
+	// the runner replaces its own Deployment image via a kubectl Job and the
+	// hub settles the op from the upgraded runner's agent_info frame.
+	AgentOpTypeUpgrade = "upgrade"
 )
 
 // AgentOpDispatchPayload is the Hub -> Runner envelope carried by
@@ -165,6 +170,26 @@ type AgentOpStatusPayload struct {
 	OpID    string `json:"opID"`
 	Status  string `json:"status"` // running | succeeded | failed
 	Message string `json:"message,omitempty"`
+}
+
+// AgentInfoPayload is the Runner -> Hub envelope carried by
+// MessageAgentInfo (RUNNER-REFLUX-SPEC §5): a one-shot self-identification
+// frame sent immediately after every successful (re)connect. The hub uses it
+// to persist targets.agent_version / last_seen_at (unlocking version
+// compatibility checks) and to reconcile a pending upgrade op: when the
+// freshly reconnected runner reports the version an upgrade was targeting,
+// the upgrade ledger row reaches its succeeded terminal state.
+//
+// TargetName is advisory only — the hub's connection-level identity (resolved
+// from X-Target-Name at dial time) is authoritative; a mismatch is audited
+// and the frame ignored, never trusted.
+type AgentInfoPayload struct {
+	AgentVersion string   `json:"agentVersion"`
+	OS           string   `json:"os"`
+	Arch         string   `json:"arch"`
+	Capabilities []string `json:"capabilities,omitempty"`
+	TargetName   string   `json:"targetName,omitempty"`
+	GoVersion    string   `json:"goVersion,omitempty"`
 }
 
 // AgentOpLogPayload is the Runner -> Hub envelope carried by

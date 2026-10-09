@@ -76,7 +76,8 @@ func (r *PipelineRunReconciler) applyCancelIfRequested(ctx context.Context, pr *
 // task marked terminal: a task that had been scheduled (it has a TaskRunRef)
 // is Failed, one that never became runnable is Skipped.
 func cancelledTaskSummary(tasks []sdpv1alpha1.PipelineTaskSpec, existing map[string]*sdpv1alpha1.TaskRun, now *metav1.Time, msg string) []sdpv1alpha1.TaskRunStatusSummary {
-	summaries := summarizeTasks(tasks, existing)
+	// 取消即终态：灰度快照随 Rollout CR 一并终止,无需回流(nil map → 不带 Rollout 字段)。
+	summaries := summarizeTasks(tasks, existing, nil)
 	for i := range summaries {
 		s := &summaries[i]
 		if isTerminalTaskPhase(s.Phase) {

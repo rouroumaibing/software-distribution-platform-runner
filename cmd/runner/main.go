@@ -34,6 +34,11 @@ import (
 // surfaces in logs instead of the runner silently spinning forever.
 const maxManagerStartAttempts = 10
 
+// runnerVersion is the binary's self-reported version, injected at build time
+// via -ldflags "-X main.runnerVersion=vX.Y.Z" (RUNNER-REFLUX-SPEC §5). "dev"
+// is the honest default for un-tagged local builds.
+var runnerVersion = "dev"
+
 func main() {
 	// controller-runtime 的 reconciler 错误（含 Reconciler error 重试日志）走
 	// 其自身 logger —— 不 SetLogger 会被 delegating logger 静默丢弃（2026-09-26
@@ -66,6 +71,15 @@ func main() {
 	if vendor, region := os.Getenv("TARGET_VENDOR"), os.Getenv("TARGET_REGION"); vendor != "" && region != "" {
 		conn.WithEnrollInfo(vendor, region)
 	}
+	// Identity frame (RUNNER-REFLUX-SPEC §5): self-report version/platform on
+	// every (re)connect so the hub persists targets.agent_version. Version is
+	// ldflags-injectable (-X main.runnerVersion=...); default "dev" keeps
+	// local builds honest instead of pretending an unknown version.
+	conn.WithAgentInfo(sdpv1alpha1.AgentInfoPayload{
+		AgentVersion: runnerVersion,
+		TargetName:   targetName,
+		Capabilities: []string{"exec", "rollout", "logstream"},
+	})
 
 	// Typed clientset is needed to stream pod logs (controller-runtime's
 	// client can't tail logs) for the B-02 live-log feature. Built once from
@@ -89,6 +103,17 @@ func main() {
 		Conn:       conn,
 		Image:      envOr("SDP_AGENT_EXEC_IMAGE", agentops.DefaultImage),
 		Timeout:    envDurationOr("SDP_AGENT_EXEC_TIMEOUT", agentops.DefaultTimeout),
+		// 自升级（INSTALL-UPGRADE-EXECUTOR-DESIGN §4.1）：chart values 开关
+		// runner.selfUpgrade.enabled 注入以下 env（SA 需 patch 本 ns deployment）。
+		// enabled=false 时 chart 注入 SDP_UPGRADE_DISABLED=true，runner 对
+		// upgrade op 显式回 failed 而不是靠 in-cluster 兜底。
+		SelfNamespace:       os.Getenv("SDP_RUNNER_NAMESPACE"),
+		SelfDeployment:      envOr("SDP_RUNNER_DEPLOYMENT", agentops.DefaultSelfDeployment),
+		SelfContainer:       envOr("SDP_RUNNER_CONTAINER", agentops.DefaultSelfContainer),
+		SelfSA:              envOr("SDP_UPGRADE_SA", agentops.DefaultSelfSA),
+		SelfRunnerImage:     envOr("SDP_RUNNER_IMAGE", agentops.DefaultRunnerImageName),
+		SelfKubectlImage:    envOr("SDP_UPGRADE_KUBECTL_IMAGE", agentops.DefaultKubectlImage),
+		SelfUpgradeDisabled: os.Getenv("SDP_UPGRADE_DISABLED") == "true",
 	}
 	conn.OnMessage(connector.MessageAgentOp, agentOpHandler.Handle)
 

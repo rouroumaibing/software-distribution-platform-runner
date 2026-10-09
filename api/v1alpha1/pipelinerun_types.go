@@ -275,6 +275,27 @@ type TaskRunStatusSummary struct {
 	StartTime      *metav1.Time `json:"startTime,omitempty"`
 	CompletionTime *metav1.Time `json:"completionTime,omitempty"`
 	Message        string       `json:"message,omitempty"`
+
+	// Rollout is the live progressive-delivery snapshot for Deploy-type
+	// tasks (RUNNER-REFLUX-SPEC §3): the PipelineRun controller fills it
+	// from the owning Rollout CR's status so the hub can persist
+	// rollout_runs with a real CurrentWeight instead of the console
+	// guessing it from task completion counts. Optional — absent for
+	// non-deploy tasks and for old runners (omitempty keeps the wire
+	// format backward compatible).
+	Rollout *RolloutStatusSummary `json:"rollout,omitempty"`
+}
+
+// RolloutStatusSummary is the reflux projection of a Rollout CR's status at
+// report time. Snapshot semantics: the hub upserts it onto the task's
+// rollout_runs row (last-write-wins); the hub accumulates the step history
+// server-side so the runner stays stateless.
+type RolloutStatusSummary struct {
+	Phase            RolloutPhase `json:"phase"`
+	CurrentStepIndex int          `json:"currentStepIndex"`
+	CurrentWeight    int          `json:"currentWeight"`
+	WorkloadRef      string       `json:"workloadRef,omitempty"`
+	Message          string       `json:"message,omitempty"`
 }
 
 // ApprovalStatus tracks the live state of a paused Approval task.

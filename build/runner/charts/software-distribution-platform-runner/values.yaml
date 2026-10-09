@@ -43,3 +43,16 @@ jobImages:
 hubApi:
   url: http://hub.sdp-workflow.svc:8080
   token: ""
+
+# 自升级（INSTALL-UPGRADE-EXECUTOR-DESIGN §4.1）：hub 派发 upgrade op 时，runner
+# 在自身命名空间创建「kubectl set image + rollout status」Job 自我替换，终态由
+# hub 侧 agent_info 版本对账收口（旧 Pod 终止导致 WS 中断是预期）。
+# enabled=false 注入 SDP_UPGRADE_DISABLED=true：runner 对 upgrade op 显式回
+# failed（不静默、不走 in-cluster 兜底）。开启前提：
+#   ① 目标版本镜像须已推入 harbor（升级 = 换 tag，不触发任何构建）；
+#   ② SA（sdp-runner）持有本 ns deployments patch 权限（chart rbac.yaml 的
+#      ClusterRole 已含，无需追加）；
+#   ③ kubectl 升级镜像默认 harbor.sdpworkflow.com/sdp/kubectl:1.30（runner 代码
+#      默认值，可用 SDP_UPGRADE_KUBECTL_IMAGE 覆盖）。
+selfUpgrade:
+  enabled: false

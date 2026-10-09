@@ -49,6 +49,24 @@ spec:
               value: {{ .Values.hubApi.url }}
             - name: SDP_HUB_API_TOKEN
               value: {{ .Values.hubApi.token }}
+{{- if .Values.selfUpgrade.enabled }}
+            # 自升级（INSTALL-UPGRADE-EXECUTOR-DESIGN §4.1）：deployment/container/SA
+            # 默认与本 chart 部署形态一致；SDP_RUNNER_IMAGE 是不带 tag 的镜像名
+            # （upgrade op 的 Detail 携带目标版本，runner 侧拼回 name:version）。
+            - name: SDP_RUNNER_NAMESPACE
+              value: {{ .Values.namespace }}
+            - name: SDP_RUNNER_DEPLOYMENT
+              value: {{ .Values.basic.component }}
+            - name: SDP_RUNNER_CONTAINER
+              value: container-1
+            - name: SDP_UPGRADE_SA
+              value: sdp-runner
+            - name: SDP_RUNNER_IMAGE
+              value: {{ .Values.image.imageAddr | splitList ":" | first }}
+{{- else }}
+            - name: SDP_UPGRADE_DISABLED
+              value: "true"
+{{- end }}
           image: {{ .Values.image.imageAddr }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           resources:

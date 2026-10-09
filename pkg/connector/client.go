@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"runtime"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -33,6 +34,7 @@ var (
 	MessageHeartbeat         = runnerapi.MessageHeartbeat
 	MessageAgentOpStatus     = runnerapi.MessageAgentOpStatus
 	MessageAgentOpLog        = runnerapi.MessageAgentOpLog
+	MessageAgentInfo         = runnerapi.MessageAgentInfo
 )
 
 // Handler processes an inbound message from the Hub. Registered per
@@ -64,6 +66,11 @@ type Client struct {
 	handlers  map[runnerapi.MessageType]Handler
 	onConnect OnConnectFunc
 
+	// agentInfo is the one-shot identity frame sent right after every
+	// successful (re)connect (RUNNER-REFLUX-SPEC §5). Nil means "old runner
+	// behavior" — no agent_info frame is emitted.
+	agentInfo *runnerapi.AgentInfoPayload
+
 	conn   *websocket.Conn
 	outbox chan Message
 }
@@ -83,6 +90,23 @@ func New(hubURL, targetName, authToken string) *Client {
 // gateway token). Returns the receiver for chaining at the call site.
 func (c *Client) WithEnrollInfo(vendor, region string) *Client {
 	c.vendor, c.region = vendor, region
+	return c
+}
+
+// WithAgentInfo sets the identity frame (RUNNER-REFLUX-SPEC §5) emitted once
+// per (re)connect. cmd/runner/main.go fills AgentVersion from ldflags; OS /
+// Arch / GoVersion default from runtime here when left empty.
+func (c *Client) WithAgentInfo(info runnerapi.AgentInfoPayload) *Client {
+	if info.OS == "" {
+		info.OS = runtime.GOOS
+	}
+	if info.Arch == "" {
+		info.Arch = runtime.GOARCH
+	}
+	if info.GoVersion == "" {
+		info.GoVersion = runtime.Version()
+	}
+	c.agentInfo = &info
 	return c
 }
 
@@ -150,6 +174,16 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 	}
 	defer conn.Close()
 	c.conn = conn
+
+	// Identity frame first (RUNNER-REFLUX-SPEC §5): the hub records
+	// agent_version before any resync traffic, so an upgrade followed by a
+	// reconnect reports the new version as the very first statement this
+	// binary makes.
+	if c.agentInfo != nil {
+		if err := c.Send(MessageAgentInfo, *c.agentInfo); err != nil {
+			log.Printf("connector: agent_info send failed: %v", err)
+		}
+	}
 
 	// We just (re)established the long connection. Fire the resync hook so
 	// the Runner re-asserts its local state with the Hub (C-05). The hub

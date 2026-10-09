@@ -105,7 +105,15 @@ func (r *PipelineRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 
 	// 汇总状态到 PipelineRun.Status.Tasks,供 kubectl / Hub 一次性看到全貌。
-	pr.Status.Tasks = summarizeTasks(pr.Spec.Tasks, existingByName)
+	// Deploy 型任务同时回流 Rollout CR 的灰度快照(RUNNER-REFLUX-SPEC §3),
+	// hub 据此落 rollout_runs,console 步宽调节自此有真实反馈环。
+	var rollouts sdpv1alpha1.RolloutList
+	if err := r.List(ctx, &rollouts, client.InNamespace(pr.Namespace), client.MatchingLabels{
+		"sdp.io/pipeline-run": pr.Name,
+	}); err != nil {
+		return ctrl.Result{}, err
+	}
+	pr.Status.Tasks = summarizeTasks(pr.Spec.Tasks, existingByName, rolloutsByName(rollouts))
 
 	// 有节点在等审批 -> 整个 PipelineRun 标记 WaitingApproval。
 	if approval := findPendingApproval(pr.Spec.Tasks, existingByName); approval != nil {
@@ -251,7 +259,7 @@ func findPendingApproval(tasks []sdpv1alpha1.PipelineTaskSpec, existing map[stri
 	return nil
 }
 
-func summarizeTasks(tasks []sdpv1alpha1.PipelineTaskSpec, existing map[string]*sdpv1alpha1.TaskRun) []sdpv1alpha1.TaskRunStatusSummary {
+func summarizeTasks(tasks []sdpv1alpha1.PipelineTaskSpec, existing map[string]*sdpv1alpha1.TaskRun, rollouts map[string]*sdpv1alpha1.Rollout) []sdpv1alpha1.TaskRunStatusSummary {
 	summaries := make([]sdpv1alpha1.TaskRunStatusSummary, 0, len(tasks))
 	for _, t := range tasks {
 		tr, ok := existing[t.Name]
@@ -267,9 +275,41 @@ func summarizeTasks(tasks []sdpv1alpha1.PipelineTaskSpec, existing map[string]*s
 			StartTime:      tr.Status.StartTime,
 			CompletionTime: tr.Status.CompletionTime,
 			Message:        tr.Status.Message,
+			Rollout:        rolloutSummaryFor(tr, rollouts),
 		})
 	}
 	return summaries
+}
+
+// rolloutsByName indexes a PipelineRun's Rollout CRs by their owning TaskRun
+// name (label sdp.io/task-run, set at creation in reconcileDeploy).
+func rolloutsByName(list sdpv1alpha1.RolloutList) map[string]*sdpv1alpha1.Rollout {
+	out := make(map[string]*sdpv1alpha1.Rollout, len(list.Items))
+	for i := range list.Items {
+		ro := &list.Items[i]
+		out[ro.Labels["sdp.io/task-run"]] = ro
+	}
+	return out
+}
+
+// rolloutSummaryFor projects the owning Rollout CR's status into the reflux
+// snapshot (RUNNER-REFLUX-SPEC §3). nil for non-deploy tasks or when the CR
+// hasn't been created yet — the omitempty keeps those frames unchanged.
+func rolloutSummaryFor(tr *sdpv1alpha1.TaskRun, rollouts map[string]*sdpv1alpha1.Rollout) *sdpv1alpha1.RolloutStatusSummary {
+	if tr.Status.RolloutRef == "" {
+		return nil
+	}
+	ro, ok := rollouts[tr.Name]
+	if !ok {
+		return nil
+	}
+	return &sdpv1alpha1.RolloutStatusSummary{
+		Phase:            ro.Status.Phase,
+		CurrentStepIndex: int(ro.Status.CurrentStepIndex),
+		CurrentWeight:    int(ro.Status.CurrentWeight),
+		WorkloadRef:      ro.Spec.WorkloadRef,
+		Message:          ro.Status.Message,
+	}
 }
 
 func buildTaskRun(pr *sdpv1alpha1.PipelineRun, task sdpv1alpha1.PipelineTaskSpec) *sdpv1alpha1.TaskRun {
