@@ -125,6 +125,21 @@ func Evaluate(ro *sdpv1alpha1.Rollout, canaryReady, canaryDesired, totalReplicas
 			d.Message = "health check failed past threshold, rolling back"
 			return d
 		}
+		// Decision #7 (ui-12 §4.5): without auto-rollback, a canary that is
+		// past the failure threshold must not wait at the same weight forever
+		// (a later reconcile would just repeat this branch). Stop as a
+		// terminal Failed rollout; recovery requires a new rollout.
+		if !ro.Spec.AutoRollback && spec.HealthCheck.FailureThreshold > 0 && cf >= spec.HealthCheck.FailureThreshold {
+			return Decision{
+				Phase:               sdpv1alpha1.RolloutFailed,
+				CurrentStepIndex:    status.CurrentStepIndex,
+				CurrentWeight:       target,
+				CanaryReplicas:      weightReplicas(target, totalReplicas),
+				StableReplicas:      totalReplicas - weightReplicas(target, totalReplicas),
+				ConsecutiveFailures: cf,
+				Message:             "health check failed past threshold, rollout failed",
+			}
+		}
 		return Decision{
 			Phase:               sdpv1alpha1.RolloutProgressing,
 			CurrentStepIndex:    status.CurrentStepIndex,

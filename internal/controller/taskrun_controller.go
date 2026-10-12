@@ -270,7 +270,8 @@ func (r *TaskRunReconciler) reconcileDeploy(ctx context.Context, tr *sdpv1alpha1
 		tr.Status.Phase = sdpv1alpha1.TaskRunSucceeded
 		now := metav1.Now()
 		tr.Status.CompletionTime = &now
-	case sdpv1alpha1.RolloutDegraded, sdpv1alpha1.RolloutRollingBack:
+	case sdpv1alpha1.RolloutDegraded, sdpv1alpha1.RolloutRollingBack,
+		sdpv1alpha1.RolloutFailed, sdpv1alpha1.RolloutRolledBack:
 		tr.Status.Phase = sdpv1alpha1.TaskRunFailed
 		tr.Status.Message = ro.Status.Message
 		now := metav1.Now()

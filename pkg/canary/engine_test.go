@@ -112,3 +112,36 @@ func TestHTTPProbeHealthCheckType(t *testing.T) {
 		t.Fatalf("HTTPProbe failure should count, got %d", d.ConsecutiveFailures)
 	}
 }
+
+// Decision #7 (ui-12 §4.5): without auto-rollback, a canary past the failure
+// threshold must stop as a terminal Failed rollout — not wait at the same
+// weight forever, and not roll back.
+func TestEvaluateHealthFailureWithoutAutoRollbackFails(t *testing.T) {
+	ro := mkRollout()
+	ro.Spec.AutoRollback = false
+	ro.Status.CurrentWeight = 50
+	ro.Status.ConsecutiveFailures = 2 // one more pushes past threshold (3)
+	d := Evaluate(ro, 2, 2, 4, false)
+	if d.Phase != sdpv1alpha1.RolloutFailed {
+		t.Fatalf("expected Failed past threshold without auto-rollback, got %s", d.Phase)
+	}
+	if d.RequeueAfter != 0 {
+		t.Fatalf("terminal Failed must not requeue, got %v", d.RequeueAfter)
+	}
+	if d.CurrentWeight != 50 {
+		t.Fatalf("Failed holds the current weight, got %d", d.CurrentWeight)
+	}
+}
+
+// Below the threshold the rollout keeps progressing regardless of the
+// auto-rollback flag — Failed is only reachable once past the threshold.
+func TestEvaluateBelowThresholdWithoutAutoRollbackProgresses(t *testing.T) {
+	ro := mkRollout()
+	ro.Spec.AutoRollback = false
+	ro.Status.CurrentWeight = 50
+	ro.Status.ConsecutiveFailures = 1
+	d := Evaluate(ro, 2, 2, 4, false)
+	if d.Phase != sdpv1alpha1.RolloutProgressing {
+		t.Fatalf("expected Progressing below threshold, got %s", d.Phase)
+	}
+}

@@ -263,6 +263,8 @@ spec:
                 - Healthy
                 - Degraded
                 - RollingBack
+                - Failed
+                - RolledBack
                 type: string
               stableReplicas:
                 format: int32

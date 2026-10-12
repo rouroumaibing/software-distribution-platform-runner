@@ -89,18 +89,20 @@ func (r *RolloutReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 
 	// Terminal hold: an operator rollback pins the canary at 0% and marks
-	// the rollout Degraded; nothing else progresses after that.
+	// the rollout RolledBack (decision #7 — a completed revert is a terminal
+	// state of its own, no longer overloaded onto Degraded); nothing else
+	// progresses after that.
 	if ro.Annotations[annRolloutAborted] == "true" {
 		total := r.ensureWorkload(ctx, &ro)
 		canaryDep := r.ensureCanary(ctx, &ro, total)
 		r.applyDecision(ctx, &ro, canary.Decision{
-			Phase:          sdpv1alpha1.RolloutDegraded,
+			Phase:          sdpv1alpha1.RolloutRolledBack,
 			CurrentWeight:  0,
 			CanaryReplicas: 0,
 			StableReplicas: total,
 			Message:        "rolled back by operator",
 		}, canaryDep, total)
-		ro.Status.Phase = sdpv1alpha1.RolloutDegraded
+		ro.Status.Phase = sdpv1alpha1.RolloutRolledBack
 		ro.Status.CurrentWeight = 0
 		ro.Status.CanaryReplicas = 0
 		ro.Status.StableReplicas = total
@@ -129,6 +131,14 @@ func (r *RolloutReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{RequeueAfter: healthCheckInterval}, r.Status().Update(ctx, &ro)
 	}
 
+	// Terminal hold (decision #7): Failed / RolledBack are end states. A
+	// later reconcile must not resume the step walk ("scaling to weight"
+	// would resurrect a rolled-back rollout); recovery requires a new
+	// Rollout. Keep the last applied weights and stop evaluating.
+	if ro.Status.Phase == sdpv1alpha1.RolloutFailed || ro.Status.Phase == sdpv1alpha1.RolloutRolledBack {
+		return ctrl.Result{}, nil
+	}
+
 	total := r.ensureWorkload(ctx, &ro)
 
 	canaryDep := r.ensureCanary(ctx, &ro, total)
@@ -146,7 +156,7 @@ func (r *RolloutReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	if canaryDeploymentHasReplicaFailure(canaryDep) && ro.Spec.AutoRollback {
 		decision := canary.RollbackDecision(&ro, total)
 		r.applyDecision(ctx, &ro, decision, canaryDep, total)
-		ro.Status.Phase = sdpv1alpha1.RolloutDegraded
+		ro.Status.Phase = sdpv1alpha1.RolloutRolledBack
 		now := metav1.Now()
 		ro.Status.CompletionTime = &now
 		metrics.Alert("rollout", ro.Name, "canary replica failure")
@@ -168,11 +178,13 @@ func (r *RolloutReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	ro.Status.Message = decision.Message
 	now := metav1.Now()
 	ro.Status.LastHealthCheckTime = &now
-	if decision.Phase == sdpv1alpha1.RolloutHealthy && ro.Status.CompletionTime == nil {
+	if (decision.Phase == sdpv1alpha1.RolloutHealthy || decision.Phase == sdpv1alpha1.RolloutFailed ||
+		decision.Phase == sdpv1alpha1.RolloutRolledBack) && ro.Status.CompletionTime == nil {
 		ro.Status.CompletionTime = &now
 	}
 	metrics.SetRolloutWeight(decision.CurrentWeight)
-	if decision.Phase == sdpv1alpha1.RolloutDegraded || decision.Phase == sdpv1alpha1.RolloutRollingBack {
+	if decision.Phase == sdpv1alpha1.RolloutDegraded || decision.Phase == sdpv1alpha1.RolloutRollingBack ||
+		decision.Phase == sdpv1alpha1.RolloutFailed || decision.Phase == sdpv1alpha1.RolloutRolledBack {
 		metrics.Alert("rollout", ro.Name, decision.Message)
 	}
 

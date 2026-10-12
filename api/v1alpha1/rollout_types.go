@@ -13,6 +13,13 @@ const (
 	RolloutHealthy     RolloutPhase = "Healthy"
 	RolloutDegraded    RolloutPhase = "Degraded"
 	RolloutRollingBack RolloutPhase = "RollingBack"
+
+	// Terminal states (decision #7, ui-12 §4.5): Failed stops a rollout whose
+	// health checks are past threshold without auto-rollback; RolledBack marks
+	// a completed revert to 0% canary weight. Both are end states — the
+	// reconciler holds on them instead of resuming the step walk.
+	RolloutFailed     RolloutPhase = "Failed"
+	RolloutRolledBack RolloutPhase = "RolledBack"
 )
 
 // TrafficRoutingType selects how canary traffic is split.
@@ -128,7 +135,7 @@ type RolloutSpec struct {
 
 // RolloutStatus defines the observed state of a Rollout.
 type RolloutStatus struct {
-	// +kubebuilder:validation:Enum=Progressing;Paused;Healthy;Degraded;RollingBack
+	// +kubebuilder:validation:Enum=Progressing;Paused;Healthy;Degraded;RollingBack;Failed;RolledBack
 	Phase RolloutPhase `json:"phase,omitempty"`
 
 	CurrentStepIndex int32 `json:"currentStepIndex,omitempty"`
