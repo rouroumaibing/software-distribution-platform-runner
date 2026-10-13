@@ -26,7 +26,7 @@ help:
 	@echo "  clean        停本地服务后删本仓生成物(output/ .run/ coverage/)，保留 controller-gen 生成文件"
 	@echo "  clean-deep   同 clean（本仓无仓内下载依赖）"
 	@echo "  build        编译二进制到 $(BIN)"
-	@echo "  package      组件打包：构建镜像并推送本地 registry (build/$(APP)/build.sh)"
+	@echo "  package      组件打包：构建镜像 (build/$(APP)/build.sh)"
 	@echo "  start-dev    启动本地开发服务(后台, pid 文件 + 进程组管理)"
 	@echo "  stop-dev     停止本地开发服务(按 pid 文件 + 进程清理)"
 	@echo ""

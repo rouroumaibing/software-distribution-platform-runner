@@ -13,7 +13,7 @@
 | make target | 作用 |
 | --- | --- |
 | `make build` | 编译二进制到 `output/bin/runner`（`go build ./cmd/runner`） |
-| `make package` | 组件打包：交叉编译 → 运行时镜像 + docker save + charts → 交付包 `output/software-distribution-platform-runner-<version>.tar.gz`，并尝试推送本地 registry（`build/runner/build.sh`） |
+| `make package` | 组件打包：交叉编译 → 运行时镜像 + docker save + charts → 交付包 `output/software-distribution-platform-runner-<version>.tar.gz`（`build/runner/build.sh`） |
 | `make start-dev` | 启动本地开发服务（`hack/svc.sh start`：pid 文件 + 进程组管理，启动前自动清理旧实例；`go run ./cmd/runner`） |
 | `make stop-dev` | 停止本地开发服务（`hack/svc.sh stop`，按 pid 文件 + 进程特征兜底清理） |
 | `make clean` | **先停本地服务**，再删生成物（`output/ .run/ coverage/`、历史位置 `bin/`、仓根裸编译二进制、散落单文件），保留下载依赖与工具链、保留 controller-gen 生成文件 |
