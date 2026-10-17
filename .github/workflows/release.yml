@@ -4,8 +4,8 @@ name: release
 # workflow_dispatch 手动 dry-run（只产 workflow artifact，不碰任何 release）。
 # 产物 = build.sh 的 <component>-<version>.tar.gz（charts + images 交付包，docker load 即可用）。
 # 镜像暂不 push 远程 registry（docs R3: registry 地址确定后定值，届时在此补 push 段）。
-# runner 独立单仓，单 checkout。注意：hub 依赖本仓 api/v1alpha1（go.mod replace 本地路径），
-#   发布顺序应 runner 先发（打 tag 后 hub 侧改 require 即可撤 replace）。
+# runner 独立单仓，单 checkout。hub 经 internal/runnerproto 快照引用 runner 的 api/v1alpha1 类型，
+#   不依赖 runner 仓库源码、无跨仓 go.mod replace，两仓发布互不约束顺序。
 
 on:
   release:

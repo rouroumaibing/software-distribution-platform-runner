@@ -25,6 +25,7 @@
 - **无入站 HTTP**：runner 出站回连 hub 的 WS 网关（`/gateway/ws`，`TARGET_AUTH_TOKEN` 认证——注意 hub 侧另有 `GATEWAY_TOKEN` 环境变量，属 hub 组件配置，勿与 runner 侧混用），断线按指数退避重连；**D-01（resilient start）**：manager 启动失败按指数退避重试至多 10 次（1s 起、30s 封顶）才 fatal 退出（`cmd/runner/main.go` `maxManagerStartAttempts`），websocket 短暂断连绝不触发 manager 重建；仅当 manager 持续无法启动（如 CRD 被删、RBAC 被回收）才退出进入 CrashLoopBackOff。另：chart values 中 `gateway.token` 为死配置（模板未引用，认证实际取 `TARGET_AUTH_TOKEN` 环境变量）。
 - **自身不执行任务**：把 hub 下发的 spec 翻译成目标集群里的 K8s Job（`pkg/executor/job_builder.go`：EmptyDir 工作区 + main/release 容器跑脚本 / `helm upgrade --install` / `kubectl apply`）；只消费 hub 已鉴权下发的 spec，自身无授权逻辑（集群侧权限由 k8s RBAC 约束，见 docs 仓 runner Story §4.4）。
 - **任务类型**：`Build` / `Test` / `Release` / `Approval`（`api/v1alpha1/pipelinerun_types.go` 枚举校验；controller 按类型分支 reconcile）。
+- **回流（runner→hub）为已知唯一协议级真缺口**：canary 当前权重（`Rollout.Status.CurrentWeight`）、agent 版本、TaskRun 产物三项尚未回传 hub（代码侧已落地，验收 gate 随云上 #10、不本地 kind 实跑）；**测试时勿依赖这些字段**。权威设计见 docs 仓 [`shared/runner-reflux-spec.md`](https://github.com/rouroumaibing/software-distribution-platform-docs/blob/main/shared/runner-reflux-spec.md)，状态跟踪见 [`plans/STATUS.md` §2 #8/#2/#10](https://github.com/rouroumaibing/software-distribution-platform-docs/blob/main/plans/STATUS.md)（与 docs STATUS G-3 对齐）。
 
 ## 设计文档
 
