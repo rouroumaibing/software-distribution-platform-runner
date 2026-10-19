@@ -116,7 +116,8 @@ ensure_nerdctl() {
         echo "ERROR: 检测到 nerdctl 但缺少 buildkitd（nerdctl build 必需），请先安装 buildkitd。" >&2
         exit 1
     }
-    pgrep -x buildkitd >/dev/null 2>&1 || nohup buildkitd --containerd-worker --addr tcp://127.0.0.1:1234 >/var/log/buildkitd.log 2>&1 &
+    # --containerd-worker 为 string 型（buildkit v0.34+），必须显式赋值；裸旗标会吃掉后面的 --addr 导致 strconv.ParseBool 崩
+    pgrep -x buildkitd >/dev/null 2>&1 || nohup buildkitd --containerd-worker=true --addr tcp://127.0.0.1:1234 >/var/log/buildkitd.log 2>&1 &
     export BUILDKIT_HOST=tcp://127.0.0.1:1234
 }
 
@@ -133,15 +134,16 @@ sdp_build() { local ctx="$1" img="$2"; shift 2
         nerdctl) nerdctl build  "$@" -t "$img" "$ctx" ;;
     esac; }
 sdp_save() {
+    # nerdctl 2.x 的 save 默认输出 docker 归档格式（无 --format 旗标），直接 save
     if [ -n "${2:-}" ]; then
         case "${SDP_RUNTIME}" in
             docker)  docker  save -o "$2" "$1" ;;
-            nerdctl) nerdctl save --format docker -o "$2" "$1" ;;
+            nerdctl) nerdctl save -o "$2" "$1" ;;
         esac
     else
         case "${SDP_RUNTIME}" in
             docker)  docker  save "$1" ;;
-            nerdctl) nerdctl save --format docker "$1" ;;
+            nerdctl) nerdctl save "$1" ;;
         esac
     fi; }
 sdp_inspect() { case "${SDP_RUNTIME}" in docker) docker image inspect "$1" ;; nerdctl) nerdctl image inspect "$1" ;; esac; }

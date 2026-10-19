@@ -20,6 +20,18 @@
 | `make clean NO_STOP=1` | 同上，但跳过停服务（CI / 无服务场景） |
 | `make clean-deep` | 本仓彻底清理（删生成物，同 `clean`）；不删下载依赖/工具链，删除范围严格限定在本仓目录内（不触碰仓库外的共享资源）；同样保留 controller-gen 生成文件 |
 
+## 镜像构建环境要求（containerd 路线）
+
+`make package` / `build/runner/build.sh` 在无 docker 的环境（如 CCE 托管节点）走 nerdctl + buildkitd 复用宿主 containerd 构建镜像，对工具链版本有**硬要求**：
+
+| 工具 | 版本要求 | 原因 |
+| --- | --- | --- |
+| nerdctl | **>= 2.x** | `nerdctl save` 默认输出 docker 归档格式，无 `--format` 旗标；`sdp_save` 按此直写 |
+| buildkitd | **>= v0.34** | `--containerd-worker` 为 string 型（true/false/auto），`build.sh` 用 `--containerd-worker=true` 显式赋值拉起；裸旗标会把后面的 `--addr` 当值吃掉导致 `strconv.ParseBool` 崩溃 |
+| containerd | 复用宿主托管实例 | **不要安装 docker / containerd.io**（会与宿主 containerd.service 冲突，CCE 节点尤其如此） |
+
+版本要求的统一权威见 docs 仓 [`shared/BUILD-TOOLCHAIN.md`](https://github.com/rouroumaibing/software-distribution-platform-docs/blob/main/shared/BUILD-TOOLCHAIN.md)。
+
 ## 行为要点（接入侧代理）
 
 - **无入站 HTTP**：runner 出站回连 hub 的 WS 网关（`/gateway/ws`，`TARGET_AUTH_TOKEN` 认证——注意 hub 侧另有 `GATEWAY_TOKEN` 环境变量，属 hub 组件配置，勿与 runner 侧混用），断线按指数退避重连；**D-01（resilient start）**：manager 启动失败按指数退避重试至多 10 次（1s 起、30s 封顶）才 fatal 退出（`cmd/runner/main.go` `maxManagerStartAttempts`），websocket 短暂断连绝不触发 manager 重建；仅当 manager 持续无法启动（如 CRD 被删、RBAC 被回收）才退出进入 CrashLoopBackOff。另：chart values 中 `gateway.token` 为死配置（模板未引用，认证实际取 `TARGET_AUTH_TOKEN` 环境变量）。
