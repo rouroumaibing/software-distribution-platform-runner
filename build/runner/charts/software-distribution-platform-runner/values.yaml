@@ -56,3 +56,8 @@ hubApi:
 #      默认值，可用 SDP_UPGRADE_KUBECTL_IMAGE 覆盖）。
 selfUpgrade:
   enabled: false
+
+# canary 发布：<workload>-sdp 流量服务的 targetPort。缺省自动取 stable workload
+# 已声明的第一个容器端口，无声明时兜底 8080；显式设置即强制覆盖（端口冲突环境用）。
+rollout:
+  serviceTargetPort: ""

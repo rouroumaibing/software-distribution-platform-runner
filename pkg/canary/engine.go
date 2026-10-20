@@ -6,6 +6,9 @@
 package canary
 
 import (
+	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	sdpv1alpha1 "github.com/rouroumaibing/software-distribution-platform-runner/api/v1alpha1"
@@ -59,9 +62,12 @@ func Evaluate(ro *sdpv1alpha1.Rollout, canaryReady, canaryDesired, totalReplicas
 
 	step := spec.Steps[status.CurrentStepIndex]
 
-	// Pause step: hold at the current weight and (optionally) requeue after
-	// the configured duration. An indefinite pause waits for an external
-	// resume (not implemented in M1) — it just stays Paused.
+	// Pause step: hold at the current weight. An indefinite pause waits for
+	// an external resume (not implemented in M1) — it just stays Paused. A
+	// Duration-carrying pause resumes automatically once the duration has
+	// elapsed since entry and the canary is healthy at the held weight. Entry
+	// time is stamped by the reconciler in PauseStartAnnotation as
+	// "<stepIndex>|<RFC3339>", per step so each pause gets its own clock.
 	if step.Pause != nil {
 		d := Decision{
 			Phase:            sdpv1alpha1.RolloutPaused,
@@ -73,6 +79,13 @@ func Evaluate(ro *sdpv1alpha1.Rollout, canaryReady, canaryDesired, totalReplicas
 		}
 		if step.Pause.Duration != nil {
 			d.RequeueAfter = step.Pause.Duration.Duration
+			if idx, startedAt, ok := ParsePauseStart(ro.Annotations[PauseStartAnnotation]); ok &&
+				idx == status.CurrentStepIndex &&
+				time.Since(startedAt) >= step.Pause.Duration.Duration && healthy {
+				d.Phase = sdpv1alpha1.RolloutProgressing
+				d.CurrentStepIndex = status.CurrentStepIndex + 1
+				d.Message = "pause elapsed, advancing"
+			}
 		}
 		return d
 	}
@@ -198,4 +211,30 @@ func healthInterval(spec sdpv1alpha1.RolloutSpec) time.Duration {
 		return 30 * time.Second
 	}
 	return time.Duration(spec.HealthCheck.IntervalSeconds) * time.Second
+}
+
+// PauseStartAnnotation stamps a timed pause's entry time so the engine can
+// tell an elapsed pause from a fresh one. Value: "<stepIndex>|<RFC3339>".
+// An annotation (not a status field) because it survives CRD pruning without
+// regeneration, and it is per step so each pause step starts its own clock.
+const PauseStartAnnotation = "sdp.io/pause-start"
+
+func FormatPauseStart(stepIndex int32, t time.Time) string {
+	return fmt.Sprintf("%d|%s", stepIndex, t.UTC().Format(time.RFC3339))
+}
+
+func ParsePauseStart(s string) (stepIndex int32, startedAt time.Time, ok bool) {
+	idx, ts, found := strings.Cut(s, "|")
+	if !found {
+		return 0, time.Time{}, false
+	}
+	n, err := strconv.Atoi(idx)
+	if err != nil {
+		return 0, time.Time{}, false
+	}
+	t, err := time.Parse(time.RFC3339, ts)
+	if err != nil {
+		return 0, time.Time{}, false
+	}
+	return int32(n), t, true
 }

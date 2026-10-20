@@ -2,6 +2,9 @@ package canary
 
 import (
 	"testing"
+	"time"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	sdpv1alpha1 "github.com/rouroumaibing/software-distribution-platform-runner/api/v1alpha1"
 )
@@ -110,6 +113,37 @@ func TestHTTPProbeHealthCheckType(t *testing.T) {
 	d := Evaluate(ro, 2, 2, 4, false)
 	if d.ConsecutiveFailures != 1 {
 		t.Fatalf("HTTPProbe failure should count, got %d", d.ConsecutiveFailures)
+	}
+}
+
+func TestTimedPauseHoldsUntilElapsed(t *testing.T) {
+	ro := mkRollout()
+	ro.Spec.Steps = []sdpv1alpha1.CanaryStep{
+		{SetWeight: ptrI32(50)},
+		{Pause: &sdpv1alpha1.PauseStep{Duration: &metav1.Duration{Duration: 30 * time.Second}}},
+		{SetWeight: ptrI32(100)},
+	}
+	ro.Status.CurrentStepIndex = 1
+	ro.Status.CurrentWeight = 50
+	// Entry annotation belongs to another step (or is missing): fresh pause, stays Paused.
+	ro.Annotations = map[string]string{PauseStartAnnotation: FormatPauseStart(0, time.Now())}
+	d := Evaluate(ro, 2, 2, 4, true)
+	if d.Phase != sdpv1alpha1.RolloutPaused {
+		t.Fatalf("fresh pause should stay Paused, got %s", d.Phase)
+	}
+	// Elapsed but unhealthy: must not advance.
+	ro.Annotations[PauseStartAnnotation] = FormatPauseStart(1, time.Now().Add(-time.Minute))
+	d = Evaluate(ro, 2, 2, 4, false)
+	if d.Phase != sdpv1alpha1.RolloutPaused {
+		t.Fatalf("unhealthy pause must not advance, got %s", d.Phase)
+	}
+	// Elapsed + healthy: advances to the next step.
+	d = Evaluate(ro, 2, 2, 4, true)
+	if d.CurrentStepIndex != 2 {
+		t.Fatalf("elapsed pause should advance to step 2, got %d", d.CurrentStepIndex)
+	}
+	if d.Phase != sdpv1alpha1.RolloutProgressing {
+		t.Fatalf("expected Progressing after pause, got %s", d.Phase)
 	}
 }
 

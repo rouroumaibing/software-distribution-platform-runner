@@ -17,16 +17,26 @@ import (
 // status. A connection error or non-2xx response is treated as unhealthy so
 // the rollout holds (and, past the failure threshold, rolls back).
 func HTTPProbe(url string, timeout time.Duration) bool {
+	_, err := HTTPProbeErr(url, timeout)
+	return err == nil
+}
+
+// HTTPProbeErr is HTTPProbe with the transport error / rejecting status
+// surfaced for diagnostics (the controller logs it on failure).
+func HTTPProbeErr(url string, timeout time.Duration) (int, error) {
 	if timeout <= 0 {
 		timeout = 5 * time.Second
 	}
 	client := &http.Client{Timeout: timeout}
 	resp, err := client.Get(url)
 	if err != nil {
-		return false
+		return 0, err
 	}
 	defer resp.Body.Close()
-	return resp.StatusCode >= 200 && resp.StatusCode < 300
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return resp.StatusCode, fmt.Errorf("probe got status %d", resp.StatusCode)
+	}
+	return resp.StatusCode, nil
 }
 
 // ThresholdMet parses the numeric query result and the configured threshold

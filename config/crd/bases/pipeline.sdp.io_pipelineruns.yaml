@@ -3,7 +3,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.21.0
+    controller-gen.kubebuilder.io/version: v0.22.0
   name: pipelineruns.pipeline.sdp.io
 spec:
   group: pipeline.sdp.io
@@ -762,6 +762,33 @@ spec:
                     retryCount:
                       format: int32
                       type: integer
+                    rollout:
+                      description: |-
+                        Rollout is the live progressive-delivery snapshot for Deploy-type
+                        tasks (RUNNER-REFLUX-SPEC §3): the PipelineRun controller fills it
+                        from the owning Rollout CR's status so the hub can persist
+                        rollout_runs with a real CurrentWeight instead of the console
+                        guessing it from task completion counts. Optional — absent for
+                        non-deploy tasks and for old runners (omitempty keeps the wire
+                        format backward compatible).
+                      properties:
+                        currentStepIndex:
+                          type: integer
+                        currentWeight:
+                          type: integer
+                        message:
+                          type: string
+                        phase:
+                          description: RolloutPhase represents the lifecycle phase
+                            of a Rollout.
+                          type: string
+                        workloadRef:
+                          type: string
+                      required:
+                      - currentStepIndex
+                      - currentWeight
+                      - phase
+                      type: object
                     startTime:
                       format: date-time
                       type: string

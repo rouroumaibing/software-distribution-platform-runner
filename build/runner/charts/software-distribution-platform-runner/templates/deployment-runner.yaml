@@ -67,6 +67,11 @@ spec:
             - name: SDP_UPGRADE_DISABLED
               value: "true"
 {{- end }}
+{{- if .Values.rollout.serviceTargetPort }}
+            # canary 发布 <workload>-sdp 服务 targetPort 强制覆盖（缺省从 stable workload 推断）
+            - name: SDP_ROLLOUT_SVC_TARGET_PORT
+              value: {{ .Values.rollout.serviceTargetPort | quote }}
+{{- end }}
           image: {{ .Values.image.imageAddr }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           resources:

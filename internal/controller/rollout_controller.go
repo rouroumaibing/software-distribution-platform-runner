@@ -12,6 +12,8 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
+	"strconv"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -139,6 +141,26 @@ func (r *RolloutReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, nil
 	}
 
+	// Timed step pause: stamp the entry time (annotation, per step index) so
+	// the engine can resume automatically once the pause duration elapses;
+	// the metadata update re-triggers this reconcile.
+	if step := currentStep(&ro); step != nil && step.Pause != nil && step.Pause.Duration != nil {
+		if _, _, ok := canary.ParsePauseStart(ro.Annotations[canary.PauseStartAnnotation]); !ok {
+			var fresh sdpv1alpha1.Rollout
+			if err := r.Get(ctx, req.NamespacedName, &fresh); err == nil {
+				base := fresh.DeepCopy()
+				if fresh.Annotations == nil {
+					fresh.Annotations = map[string]string{}
+				}
+				fresh.Annotations[canary.PauseStartAnnotation] = canary.FormatPauseStart(ro.Status.CurrentStepIndex, time.Now())
+				if err := r.Patch(ctx, &fresh, client.MergeFrom(base)); err != nil {
+					return ctrl.Result{}, err
+				}
+				return ctrl.Result{RequeueAfter: step.Pause.Duration.Duration}, nil
+			}
+		}
+	}
+
 	total := r.ensureWorkload(ctx, &ro)
 
 	canaryDep := r.ensureCanary(ctx, &ro, total)
@@ -149,7 +171,17 @@ func (r *RolloutReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	// canary engine so it won't advance a step the canary hasn't actually
 	// passed.
 	healthy := canaryReady >= canaryDesired && canaryDesired > 0
-	healthy = canaryHealthy(&ro, canaryReady, canaryDesired, healthy)
+	// Pace the active probe: event-driven reconciles (Owns Deployment/Service)
+	// fire repeatedly while Deployments churn during a scale transition, and
+	// endpoints are transiently empty (terminating pods removed, replacement
+	// pods not ready yet). Without pacing that one-second window counts as
+	// several "consecutive" failures and trips an instant rollback — failures
+	// may only accumulate at the health-check interval.
+	probed := false
+	if ro.Status.LastHealthCheckTime == nil || time.Since(ro.Status.LastHealthCheckTime.Time) >= healthCheckInterval {
+		healthy = canaryHealthy(&ro, canaryReady, canaryDesired, healthy)
+		probed = true
+	}
 
 	// Auto-rollback: a canary Deployment that can't make progress (image pull
 	// error, crashloop, etc.) is a hard failure regardless of weight.
@@ -177,7 +209,9 @@ func (r *RolloutReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	ro.Status.ConsecutiveFailures = decision.ConsecutiveFailures
 	ro.Status.Message = decision.Message
 	now := metav1.Now()
-	ro.Status.LastHealthCheckTime = &now
+	if probed {
+		ro.Status.LastHealthCheckTime = &now
+	}
 	if (decision.Phase == sdpv1alpha1.RolloutHealthy || decision.Phase == sdpv1alpha1.RolloutFailed ||
 		decision.Phase == sdpv1alpha1.RolloutRolledBack) && ro.Status.CompletionTime == nil {
 		ro.Status.CompletionTime = &now
@@ -204,7 +238,7 @@ func (r *RolloutReconciler) applyDecision(ctx context.Context, ro *sdpv1alpha1.R
 	if canaryDep != nil {
 		r.scaleDeployment(ctx, canaryDep, d.CanaryReplicas)
 	}
-	_ = r.ensureService(ctx, ro)
+	_ = r.ensureService(ctx, ro, stable)
 	r.ensureCanaryIngress(ctx, ro, d.CurrentWeight)
 }
 
@@ -329,7 +363,7 @@ func (r *RolloutReconciler) ensureCanary(ctx context.Context, ro *sdpv1alpha1.Ro
 // ratio — the DeploymentWeight routing mechanism. IngressCanary routing is
 // recorded but, in M1, falls back to the same replica split (a dedicated
 // canary Ingress resource is a documented follow-up).
-func (r *RolloutReconciler) ensureService(ctx context.Context, ro *sdpv1alpha1.Rollout) *corev1.Service {
+func (r *RolloutReconciler) ensureService(ctx context.Context, ro *sdpv1alpha1.Rollout, stable *appsv1.Deployment) *corev1.Service {
 	name := ro.Spec.WorkloadRef + "-sdp"
 	var svc corev1.Service
 	err := r.Get(ctx, client.ObjectKey{Namespace: ro.Namespace, Name: name}, &svc)
@@ -339,6 +373,7 @@ func (r *RolloutReconciler) ensureService(ctx context.Context, ro *sdpv1alpha1.R
 	if !apierrors.IsNotFound(err) {
 		return nil
 	}
+	targetPort := resolveServiceTargetPort(stable, rolloutSvcTargetPortEnv())
 	svc = corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
@@ -352,7 +387,7 @@ func (r *RolloutReconciler) ensureService(ctx context.Context, ro *sdpv1alpha1.R
 			Type:     corev1.ServiceTypeClusterIP,
 			Selector: map[string]string{appLabel: ro.Spec.WorkloadRef},
 			Ports: []corev1.ServicePort{
-				{Name: "http", Port: 80, TargetPort: intstr.FromInt(8080)},
+				{Name: "http", Port: 80, TargetPort: intstr.FromInt(int(targetPort))},
 			},
 		},
 	}
@@ -366,12 +401,58 @@ func (r *RolloutReconciler) ensureService(ctx context.Context, ro *sdpv1alpha1.R
 	return &svc
 }
 
+// rolloutSvcTargetPortEnv reads the SDP_ROLLOUT_SVC_TARGET_PORT override
+// (chart values rollout.serviceTargetPort); 0 when unset or invalid.
+func rolloutSvcTargetPortEnv() int32 {
+	v := os.Getenv("SDP_ROLLOUT_SVC_TARGET_PORT")
+	if v == "" {
+		return 0
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return 0
+	}
+	return int32(n)
+}
+
+// resolveServiceTargetPort decides the <workload>-sdp Service targetPort:
+// env override (SDP_ROLLOUT_SVC_TARGET_PORT) > the stable workload's declared
+// container port > fallback 8080. 8080 is only a fallback, not a convention —
+// apps listen on arbitrary ports and a hardcoded value both collides with
+// other services and breaks health probing for anything else.
+func resolveServiceTargetPort(stable *appsv1.Deployment, envPort int32) int32 {
+	if envPort > 0 {
+		return envPort
+	}
+	if stable != nil {
+		for _, c := range stable.Spec.Template.Spec.Containers {
+			if len(c.Ports) > 0 {
+				return c.Ports[0].ContainerPort
+			}
+		}
+	}
+	return 8080
+}
+
+// currentStep returns the step the status is currently walking, or nil when
+// all steps are consumed.
+func currentStep(ro *sdpv1alpha1.Rollout) *sdpv1alpha1.CanaryStep {
+	if int(ro.Status.CurrentStepIndex) < len(ro.Spec.Steps) {
+		return &ro.Spec.Steps[ro.Status.CurrentStepIndex]
+	}
+	return nil
+}
+
 func (r *RolloutReconciler) scaleDeployment(ctx context.Context, dep *appsv1.Deployment, replicas int32) {
 	if dep.Spec.Replicas != nil && *dep.Spec.Replicas == replicas {
 		return
 	}
+	// Merge patch (not Update): the deployment controller rewrites status
+	// constantly, so a read-modify-write Update almost always loses the
+	// resourceVersion race and the scale silently never lands.
+	base := dep.DeepCopy()
 	dep.Spec.Replicas = int32Ptr(replicas)
-	if err := r.Update(ctx, dep); err != nil {
+	if err := r.Patch(ctx, dep, client.MergeFrom(base)); err != nil {
 		log.Printf("rollout: scale %s failed: %v", dep.Name, err)
 	}
 }
@@ -613,7 +694,11 @@ func canaryHealthy(ro *sdpv1alpha1.Rollout, canaryReady, canaryDesired int32, po
 		}
 		url := fmt.Sprintf("http://%s-sdp.%s.svc.cluster.local:80%s",
 			ro.Spec.WorkloadRef, ro.Namespace, path)
-		return health.HTTPProbe(url, timeout)
+		status, err := health.HTTPProbeErr(url, timeout)
+		if err != nil {
+			log.Printf("rollout: HTTPProbe %s failed: status=%d err=%v", url, status, err)
+		}
+		return err == nil
 	case sdpv1alpha1.HealthCheckPrometheusQuery:
 		if PrometheusEndpoint == "" {
 			log.Printf("rollout: PrometheusQuery health check has no endpoint configured; holding")
