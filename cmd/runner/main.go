@@ -55,6 +55,19 @@ func main() {
 
 	targetName := mustEnv("TARGET_NAME")
 
+	// 三态鉴权发送侧（STEELMAN-ADR2-LEFTOVERS §7）：持久化 per-target 凭据 >
+	// 一次性 enroll token（join-bundle 签发，首拨换取凭据落盘）> legacy 共享
+	// token（TARGET_AUTH_TOKEN，dev/存量部署）。三者皆无 => fail-fast，避免
+	// 空 bearer 进重连死循环。
+	credFile := envOr("SDP_RUNNER_CREDENTIAL_FILE", "/etc/sdp-runner/credential")
+	enrollToken := os.Getenv("SDP_ENROLL_TOKEN")
+	legacyToken := os.Getenv("TARGET_AUTH_TOKEN")
+	if legacyToken == "" && enrollToken == "" {
+		if _, err := os.Stat(credFile); err != nil {
+			log.Fatalf("runner: no credentials available: set SDP_ENROLL_TOKEN (join bundle), TARGET_AUTH_TOKEN (legacy), or provide a readable %s", credFile)
+		}
+	}
+
 	// Outbound long connection to the Hub. cmd/runner/main.go is the ONLY
 	// place that wires the connector's message handlers. The connector keeps
 	// its own reconnect loop entirely independent of the controller-runtime
@@ -62,8 +75,12 @@ func main() {
 	conn := connector.New(
 		mustEnv("HUB_GATEWAY_URL"),
 		targetName,
-		mustEnv("TARGET_AUTH_TOKEN"),
+		legacyToken,
 	)
+	// One-time enroll-token bootstrap: the hub trades the token for a
+	// per-target credential returned on the 101 response, persisted at
+	// credFile and preferred on every later dial.
+	conn.WithEnrollBootstrap(enrollToken, credFile)
 	// ADR-0001 bootstrap-on-first-connect: when the deployment carries the
 	// target registry attributes, every dial offers them so the Hub can
 	// auto-enroll a not-yet-registered target on first connect. Both must be
@@ -124,8 +141,9 @@ func main() {
 		ArtifactImage: envOr("SDP_JOB_IMAGE_ARTIFACT", executor.DefaultArtifactImage),
 		HelmImage:     envOr("SDP_JOB_IMAGE_HELM", executor.DefaultHelmImage),
 		KubectlImage:  envOr("SDP_JOB_IMAGE_KUBECTL", executor.DefaultKubectlImage),
-		HubBaseURL:    envOr("SDP_HUB_BASE_URL", "http://hub.sdp-workflow.svc:8080"),
+		HubBaseURL:    envOr("SDP_HUB_BASE_URL", "https://hub.sdp-workflow.svc:8080"),
 		HubAPIToken:   os.Getenv("SDP_HUB_API_TOKEN"),
+		HubCABundle:   readHubCABundle(os.Getenv("SDP_HUB_CA_FILE")),
 	}
 
 	// startManager builds a fresh controller-runtime manager, (re)wires the
@@ -249,6 +267,20 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// readHubCABundle reads the hub TLS CA (PEM) from caPath for propagation into
+// job pods (ConfigMap sync + SSL_CERT_FILE). Empty path or unreadable file
+// returns "" — job pods then skip the mount and trust the system pool (real-PKI).
+func readHubCABundle(caPath string) string {
+	if caPath == "" {
+		return ""
+	}
+	b, err := os.ReadFile(caPath)
+	if err != nil {
+		return ""
+	}
+	return string(b)
 }
 
 func envDurationOr(key string, fallback time.Duration) time.Duration {

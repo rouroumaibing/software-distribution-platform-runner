@@ -123,7 +123,7 @@ func (r *PipelineRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 	pr.Status.CurrentApproval = nil
 
-	// 有节点失败 -> 整个 PipelineRun 标记 Failed,不再调度新节点。
+	// 有节点失败 -> 整个 PipelineRun 标记 Failed,停止调度新节点。
 	if hasFailedTask(existingByName) {
 		pr.Status.Phase = sdpv1alpha1.PipelineRunFailed
 		return ctrl.Result{}, r.updateStatus(ctx, &pr)

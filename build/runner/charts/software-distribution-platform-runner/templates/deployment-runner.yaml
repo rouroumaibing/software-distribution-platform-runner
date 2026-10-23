@@ -21,11 +21,23 @@ spec:
         version: v1
     spec:
       serviceAccountName: sdp-runner
+      # 镜像拉取凭据：runner 用自定义 SA sdp-runner（不继承 default SA 的 patch），
+      # 必须在 pod spec 显式声明；留空则不渲染（无鉴权 registry 场景）。
+      {{- if .Values.image.imagePullSecrets }}
+      imagePullSecrets:
+        - name: {{ .Values.image.imagePullSecrets }}
+      {{- end }}
       containers:
         - name: container-1
           env:
             - name: HUB_GATEWAY_URL
-              value: {{ .Values.gateway.url }}
+              value: {{ .Values.hub.gatewayUrl }}
+            # hub 后端 TLS：runner 挂 CA 后凭 SSL_CERT_FILE 建立信任（gorilla 默认
+            # dialer 走系统池，Linux 读该变量）；caSecretName 留空则不挂载、不注入。
+            {{- if .Values.hub.caSecretName }}
+            - name: SSL_CERT_FILE
+              value: /etc/hub-certs/ca.crt
+            {{- end }}
             - name: TARGET_NAME
               value: {{ .Values.target.name }}
             - name: TARGET_AUTH_TOKEN
@@ -46,9 +58,13 @@ spec:
             - name: SDP_JOB_IMAGE_KUBECTL
               value: {{ .Values.jobImages.kubectl }}
             - name: SDP_HUB_BASE_URL
-              value: {{ .Values.hubApi.url }}
+              value: {{ .Values.hub.apiBaseUrl }}
             - name: SDP_HUB_API_TOKEN
-              value: {{ .Values.hubApi.token }}
+              value: {{ .Values.hub.apiToken | quote }}
+            {{- if .Values.hub.caSecretName }}
+            - name: SDP_HUB_CA_FILE
+              value: /etc/hub-certs/ca.crt
+            {{- end }}
 {{- if .Values.selfUpgrade.enabled }}
             # 自升级（INSTALL-UPGRADE-EXECUTOR-DESIGN §4.1）：deployment/container/SA
             # 默认与本 chart 部署形态一致；SDP_RUNNER_IMAGE 是不带 tag 的镜像名
@@ -74,6 +90,12 @@ spec:
 {{- end }}
           image: {{ .Values.image.imageAddr }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- if .Values.hub.caSecretName }}
+          volumeMounts:
+            - name: hub-certs
+              mountPath: /etc/hub-certs
+              readOnly: true
+          {{- end }}
           resources:
             requests:
               cpu: {{ .Values.resources.resources_cpu_requests }}
@@ -81,6 +103,17 @@ spec:
             limits:
               cpu: {{ .Values.resources.resources_cpu_limits }}
               memory: {{ .Values.resources.resources_mem_limits }}
+      {{- if .Values.hub.caSecretName }}
+      # runner 把该 CA 内容同步为 job 所在 ns 的 ConfigMap（taskrun 控制器），
+      # job Pod 挂载后凭 SSL_CERT_FILE 让 curl 信任 hub 后端 TLS（用户脚本零改动）。
+      volumes:
+        - name: hub-certs
+          secret:
+            secretName: {{ .Values.hub.caSecretName }}
+            items:
+              - key: ca.crt
+                path: ca.crt
+      {{- end }}
       terminationGracePeriodSeconds: 30
       dnsPolicy: ClusterFirst
   strategy:

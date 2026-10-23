@@ -25,8 +25,8 @@ fi
 
 function prepare_go_mod(){
     export GO111MODULE=on
-    # GOPROXY 优先沿用环境（内网可指向私有代理）；环境为空时回退官方代理
-    export GOPROXY="${GOPROXY:-https://goproxy.cn,direct}"
+    # 用 SDP_GOPROXY 而非裸 GOPROXY：避免节点已 set 的坏 GOPROXY（proxy.golang.org 云上不可达）被沿用（T1）
+    export GOPROXY="${SDP_GOPROXY:-https://goproxy.cn,direct}"
     export GONOSUMDB='*'
     export GOSUMDB=off
     export CGO_ENABLED=0
@@ -86,7 +86,9 @@ function build_runner(){
     mkdir -p "${OUTPUTDIR}/staging"
     pushd "${PROJECT_ROOT}" > /dev/null
     echo "== go build (linux/amd64) ${component} =="
-    GOOS=linux GOARCH=amd64 go build -trimpath \
+    # -buildvcs=false：从 tar/artifact 展开的无 .git 源码构建时，Go 默认的 VCS 戳记
+    # 会直接报错退出；版本信息已由 ldflags -X main.version 注入，无需 VCS 戳记。
+    GOOS=linux GOARCH=amd64 go build -buildvcs=false -trimpath \
         -ldflags "-s -w -X main.buildDate=${buildDate} -X main.version=${version}" \
         -o "${OUTPUTDIR}/staging/${component}" ./cmd/runner
     popd > /dev/null

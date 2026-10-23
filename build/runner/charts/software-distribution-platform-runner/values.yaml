@@ -9,6 +9,10 @@ basic:
 image:
   imageAddr: harbor.sdpworkflow.com/sdp/software-distribution-platform-runner:v0.0.1
   pullPolicy: Always
+  # pod spec 级拉取凭据名（与 console chart 同款字段）；runner 用自定义 SA
+  # sdp-runner，不吃 default SA 的凭据注入，必须在此显式声明。
+  # 留空 = 不渲染 imagePullSecrets（registry 无鉴权场景）。
+  imagePullSecrets: default-secret
 
 resources:
   resources_cpu_requests: 100m
@@ -16,10 +20,18 @@ resources:
   resources_mem_requests: 128Mi
   resources_mem_limits: 512Mi
 
-# gateway 配置须与 hub chart 成对修改（hub 在 sdp-workflow）
-gateway:
-  url: ws://hub.sdp-workflow.svc:8080/gateway/ws
-  token: sdp-dev-token-2026
+# hub 连接契约：runner 消费 hub 的两个入口（WS 回流 + REST API）。
+# gatewayUrl 指向 hub 进程内的 runner 网关端点（hub 仓 internal/gateway 模块，env 名
+# HUB_GATEWAY_URL 沿用该历史命名）——不是 Envoy Gateway。hub 后端 8080 为 TLS
+# （wss/https 同端口），自签 CA 由 cert-create.sh 统一生成（SAN 覆盖 hub svc 名链）。
+# 集群内部署默认直连 svc；集群外 runner 把两个 URL 覆盖为网关对外地址
+# （wss://<host>/gateway/ws 与 https://<host>），caSecretName 引用本命名空间内
+# 含 ca.crt 的 secret（无则留空，走系统信任池，适用于真实 PKI）。
+hub:
+  gatewayUrl: wss://hub.sdp-workflow.svc:8080/gateway/ws
+  apiBaseUrl: https://hub.sdp-workflow.svc:8080
+  apiToken: ""
+  caSecretName: hub-tls
 
 # target 对接信息（ADR-0001 首连自注册）：vendor/region 都非空时，runner 每次拨号
 # 把它们随 X-Target-Vendor/X-Target-Region 透传，hub 在持有合法 gateway token 的前提
@@ -31,18 +43,12 @@ target:
   vendor: kind
   region: local
 
-# G-7：执行 Job 的四个默认镜像可按环境覆盖（受限 registry 换成私有 mirror 即可）；
-# G-6：consume init 容器走 hub API 下载产物 —— hubApi.url 必须是 job Pod 可达的
-# 地址，hubApi.token 为可选的 Bearer（hub 关闭鉴权时留空）。
+# G-7：执行 Job 的四个默认镜像可按环境覆盖（受限 registry 换成私有 mirror 即可）。
 jobImages:
   git: alpine/git:2.45.2
   artifact: curlimages/curl:8.8.0
   helm: alpine/helm:3.14.4
   kubectl: bitnami/kubectl:1.30
-
-hubApi:
-  url: http://hub.sdp-workflow.svc:8080
-  token: ""
 
 # 自升级（INSTALL-UPGRADE-EXECUTOR-DESIGN §4.1）：hub 派发 upgrade op 时，runner
 # 在自身命名空间创建「kubectl set image + rollout status」Job 自我替换，终态由

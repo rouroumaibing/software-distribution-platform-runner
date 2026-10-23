@@ -97,6 +97,10 @@ func (r *TaskRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		if err := controllerutil.SetControllerReference(&tr, job, r.Scheme()); err != nil {
 			return ctrl.Result{}, err
 		}
+		// hub TLS CA：先于 Job 同步 ConfigMap，保证 Pod 挂载不悬空。
+		if err := r.ensureHubCAMap(ctx, job.Namespace); err != nil {
+			return ctrl.Result{}, err
+		}
 		if err := r.Create(ctx, job); err != nil && !apierrors.IsAlreadyExists(err) {
 			return ctrl.Result{}, err
 		}

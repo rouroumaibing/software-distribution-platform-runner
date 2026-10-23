@@ -35,7 +35,7 @@ const (
 	// without this package importing os (G-7: all four are overridable via
 	// SDP_JOB_IMAGE_* runner env).
 	//
-	// STATUS #22①（2026-10-08）：默认镜像入 harbor。项目内统一用扁平命名
+	// STATUS #22①：默认镜像入 harbor。项目内统一用扁平命名
 	// `harbor.sdpworkflow.com/sdp/<名>:<tag>`（映射：alpine/git→git、
 	// curlimages/curl→curl、alpine/helm→helm、bitnami/kubectl→kubectl），
 	// 与平台三组件镜像（harbor.sdpworkflow.com/sdp/hub 等）同一 project。
@@ -72,12 +72,17 @@ type JobBuilder struct {
 	HelmImage     string
 	KubectlImage  string
 	// HubBaseURL is the hub API base reachable from job pods (e.g.
-	// http://hub.sdp-workflow.svc:8080). Required for artifact upload
+	// https://hub.sdp-workflow.svc:8080). Required for artifact upload
 	// (archive scripts call the hub themselves) and consume downloads.
 	HubBaseURL string
 	// HubAPIToken is an optional bearer token for hub API calls from job
 	// containers; empty is fine when the hub runs with auth disabled.
 	HubAPIToken string
+	// HubCABundle is the hub TLS CA (PEM). Non-empty: the TaskRun controller
+	// syncs it as a sdp-hub-ca ConfigMap in the job namespace and job pods
+	// mount it with SSL_CERT_FILE so curl-based hub calls trust the
+	// self-signed backend. Empty (real PKI): no mount, system trust pool.
+	HubCABundle string
 }
 
 func NewJobBuilder() *JobBuilder {
@@ -88,6 +93,18 @@ func NewJobBuilder() *JobBuilder {
 		KubectlImage:  DefaultKubectlImage,
 	}
 }
+
+// Hub TLS CA propagation constants: the TaskRun controller syncs the runner's
+// CA bundle into the job namespace as this ConfigMap; job pods mount it and
+// get SSL_CERT_FILE so curl-based hub calls (artifact upload/download) trust
+// the hub backend's self-signed TLS without any script changes.
+const (
+	HubCAConfigMapName = "sdp-hub-ca"
+	hubCAVolumeName    = "hub-ca"
+	hubCAMountPath     = "/etc/sdp-hub-ca"
+	HubCAKey           = "ca.crt"
+	hubCACertFile      = hubCAMountPath + "/" + HubCAKey
+)
 
 // Build constructs the Job for tr. Callers are expected to
 // controllerutil.SetControllerReference(tr, job, scheme) themselves so
@@ -114,6 +131,31 @@ func (b *JobBuilder) Build(tr *sdpv1alpha1.TaskRun) *batchv1.Job {
 		main = b.mainContainer(tr)
 	}
 
+	// hub TLS CA: mount into every hub-calling container (consume downloads
+	// + main-container upload scripts).
+	var caVolumes []corev1.Volume
+	if b.HubCABundle != "" {
+		caVolumes = append(caVolumes, corev1.Volume{
+			Name: hubCAVolumeName,
+			VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{Name: HubCAConfigMapName},
+					Items:                []corev1.KeyToPath{{Key: HubCAKey, Path: HubCAKey}},
+				},
+			},
+		})
+		caMount := corev1.VolumeMount{Name: hubCAVolumeName, MountPath: hubCAMountPath, ReadOnly: true}
+		caEnv := corev1.EnvVar{Name: "SSL_CERT_FILE", Value: hubCACertFile}
+		for i := range initContainers {
+			if initContainers[i].Name == "fetch-artifacts" {
+				initContainers[i].VolumeMounts = append(initContainers[i].VolumeMounts, caMount)
+				initContainers[i].Env = append(initContainers[i].Env, caEnv)
+			}
+		}
+		main.VolumeMounts = append(main.VolumeMounts, caMount)
+		main.Env = append(main.Env, caEnv)
+	}
+
 	backoffLimit := int32(0) // 重试由 TaskRun 控制器基于 RetryPolicy 重新创建 Job 决定,不用 Job 自带的重试
 
 	job := &batchv1.Job{
@@ -135,9 +177,7 @@ func (b *JobBuilder) Build(tr *sdpv1alpha1.TaskRun) *batchv1.Job {
 					ServiceAccountName: tr.Spec.ServiceAccountName,
 					InitContainers:     initContainers,
 					Containers:         []corev1.Container{main},
-					Volumes: []corev1.Volume{
-						{Name: "workspace", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
-					},
+					Volumes:            append([]corev1.Volume{{Name: "workspace", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}}}, caVolumes...),
 				},
 			},
 		},

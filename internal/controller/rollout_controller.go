@@ -92,7 +92,7 @@ func (r *RolloutReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 	// Terminal hold: an operator rollback pins the canary at 0% and marks
 	// the rollout RolledBack (decision #7 — a completed revert is a terminal
-	// state of its own, no longer overloaded onto Degraded); nothing else
+	// state of its own, moved off Degraded); nothing else
 	// progresses after that.
 	if ro.Annotations[annRolloutAborted] == "true" {
 		total := r.ensureWorkload(ctx, &ro)

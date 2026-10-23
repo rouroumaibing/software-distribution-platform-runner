@@ -9,6 +9,7 @@
 - `package` 产物（交付包）默认版本 `v0.0.1`；
 - **起服务**：`make start-dev`（后台运行，pid 文件 + 进程组管理）→ `make stop-dev`；产出镜像 / 交付包用 `make package`；
 - controller-gen 生成文件（`api/v1alpha1/zz_generated.deepcopy.go`、`config/crd/bases/*.yaml`）属构建/打包输入，**clean 不删、保留**；`config/rbac/` 目录当前仅存 `.gitkeep`（无 RBAC 清单，集群侧 RBAC 实际由 chart 承担），同样保留；同一规则的还有 hub 的 swaggo docs（`docs/{docs.go,swagger.json,swagger.yaml}`：已入库、clean 默认保留，见 hub README「swaggo API 文档」）。
+- **外部主机部署形态**：集群外 runner 目标机自举走 `deploy/cloud-init-runner.yaml.tpl`（cloud-init 模板，由装机管线渲染 `join-bundle` 数据后注入 userdata）；设计/行为规格见 docs 仓 [`runner/features/target-bootstrap.md`](https://github.com/rouroumaibing/software-distribution-platform-docs/blob/main/runner/features/target-bootstrap.md)（权威决策见 [`shared/ADR-0002-runner-install-bootstrap.md`](https://github.com/rouroumaibing/software-distribution-platform-docs/blob/main/shared/ADR-0002-runner-install-bootstrap.md)）。
 
 | make target | 作用 |
 | --- | --- |
@@ -32,9 +33,11 @@
 
 版本要求的统一权威见 docs 仓 [`shared/BUILD-TOOLCHAIN.md`](https://github.com/rouroumaibing/software-distribution-platform-docs/blob/main/shared/BUILD-TOOLCHAIN.md)。
 
+构建容器内还屏蔽了节点坏环境：`GOPROXY` 经 `SDP_GOPROXY` 覆盖（默认 `https://goproxy.cn,direct`）、`go build` 加 `-buildvcs=false`、`Dockerfile` 的 apt 源经 `APT_MIRROR` 参数化（默认华为云镜像）；详见 BUILD-TOOLCHAIN §2。
+
 ## 行为要点（接入侧代理）
 
-- **无入站 HTTP**：runner 出站回连 hub 的 WS 网关（`/gateway/ws`，`TARGET_AUTH_TOKEN` 认证——注意 hub 侧另有 `GATEWAY_TOKEN` 环境变量，属 hub 组件配置，勿与 runner 侧混用），断线按指数退避重连；**D-01（resilient start）**：manager 启动失败按指数退避重试至多 10 次（1s 起、30s 封顶）才 fatal 退出（`cmd/runner/main.go` `maxManagerStartAttempts`），websocket 短暂断连绝不触发 manager 重建；仅当 manager 持续无法启动（如 CRD 被删、RBAC 被回收）才退出进入 CrashLoopBackOff。另：chart values 中 `gateway.token` 为死配置（模板未引用，认证实际取 `TARGET_AUTH_TOKEN` 环境变量）。
+- **无入站 HTTP**：runner 出站回连 hub 的 WS 网关（`/gateway/ws`，`TARGET_AUTH_TOKEN` 认证——注意 hub 侧另有 `GATEWAY_TOKEN` 环境变量，属 hub 组件配置，勿与 runner 侧混用），断线按指数退避重连；**D-01（resilient start）**：manager 启动失败按指数退避重试至多 10 次（1s 起、30s 封顶）才 fatal 退出（`cmd/runner/main.go` `maxManagerStartAttempts`），websocket 短暂断连绝不触发 manager 重建；仅当 manager 持续无法启动（如 CRD 被删、RBAC 被回收）才退出进入 CrashLoopBackOff。hub 后端为 TLS（`wss://`/`https://` 同端口 8080）：chart values 的 `hub.caSecretName`（默认 `hub-tls`）挂载 CA 后凭 `SSL_CERT_FILE` 建立信任；集群外 runner 把 `hub.gatewayUrl`/`hub.apiBaseUrl` 覆盖为网关对外地址（hub HTTPRoute 已含 `/gateway` 规则）。
 - **自身不执行任务**：把 hub 下发的 spec 翻译成目标集群里的 K8s Job（`pkg/executor/job_builder.go`：EmptyDir 工作区 + main/release 容器跑脚本 / `helm upgrade --install` / `kubectl apply`）；只消费 hub 已鉴权下发的 spec，自身无授权逻辑（集群侧权限由 k8s RBAC 约束，见 docs 仓 runner Story §4.4）。
 - **任务类型**：`Build` / `Test` / `Release` / `Approval`（`api/v1alpha1/pipelinerun_types.go` 枚举校验；controller 按类型分支 reconcile）。
 - **回流（runner→hub）现状**：canary 权重快照（`Rollout.Status` → hub `rollout_runs` → `GET /releases?pipelineRunId`）与 agent 身份帧（`MessageAgentInfo` → `targets.agent_version`）均已闭环——云上 canary E2E（`e2e-canary.sh` PASS=9 FAIL=0）断言快照回流通过；TaskRun 产物回流为协议预留（`artifacts` 表已覆盖登记链路，不实现生产者）。权威设计见 docs 仓 [`shared/runner-reflux-spec.md`](https://github.com/rouroumaibing/software-distribution-platform-docs/blob/main/shared/runner-reflux-spec.md)，状态跟踪见 [`plans/STATUS.md` §2 #8/#16](https://github.com/rouroumaibing/software-distribution-platform-docs/blob/main/plans/STATUS.md)。

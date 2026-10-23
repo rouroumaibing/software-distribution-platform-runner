@@ -8,7 +8,10 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"os"
+	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -54,7 +57,13 @@ type OnConnectFunc func()
 type Client struct {
 	hubURL     string
 	targetName string
-	authToken  string // Target registration token, rotated periodically — see hub's targets table.
+	authToken  string // Legacy shared gateway token (dev / pre-migration deployments).
+	// Per-target bootstrap (STEELMAN-ADR2-LEFTOVERS §7): the one-time enroll
+	// token from the join bundle is traded for a per-target credential on the
+	// first dial; the credential persists at credentialFile and wins over the
+	// enroll token and the legacy token thereafter.
+	enrollToken    string
+	credentialFile string
 
 	// Enrollment attributes (ADR-0001 bootstrap-on-first-connect): when both
 	// are non-empty they ride every dial as X-Target-Vendor/X-Target-Region,
@@ -91,6 +100,53 @@ func New(hubURL, targetName, authToken string) *Client {
 func (c *Client) WithEnrollInfo(vendor, region string) *Client {
 	c.vendor, c.region = vendor, region
 	return c
+}
+
+// WithEnrollBootstrap wires one-time enroll-token bootstrap
+// (STEELMAN-ADR2-LEFTOVERS §7 runner state): on the first dial the enroll
+// token (from the join bundle) rides as the bearer; the hub consumes it and
+// returns the per-target credential on the 101 response header
+// (X-SDP-Runner-Credential), which the connector persists at credentialFile
+// (0600) and prefers for every later dial. Empty enrollToken or empty
+// credentialFile disables the bootstrap path (legacy shared-token mode).
+func (c *Client) WithEnrollBootstrap(enrollToken, credentialFile string) *Client {
+	c.enrollToken = enrollToken
+	c.credentialFile = credentialFile
+	return c
+}
+
+// currentToken picks the bearer for this dial: persisted per-target
+// credential > one-time enroll token > legacy shared token.
+func (c *Client) currentToken() string {
+	if c.credentialFile != "" {
+		if b, err := os.ReadFile(c.credentialFile); err == nil {
+			if tok := strings.TrimSpace(string(b)); tok != "" {
+				return tok
+			}
+		}
+	}
+	if c.enrollToken != "" {
+		return c.enrollToken
+	}
+	return c.authToken
+}
+
+// persistCredential stores the hub-issued per-target credential for all
+// future dials. Best effort, but a failure is loud: the enroll token is
+// single-use and already burned, so without the file the next dial would 401.
+func (c *Client) persistCredential(cred string) {
+	if c.credentialFile == "" || cred == "" {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(c.credentialFile), 0o700); err != nil {
+		log.Printf("connector: WARNING cannot create %s: %v (enroll token already burned)", filepath.Dir(c.credentialFile), err)
+		return
+	}
+	if err := os.WriteFile(c.credentialFile, []byte(cred+"\n"), 0o600); err != nil {
+		log.Printf("connector: WARNING cannot store per-target credential at %s: %v (enroll token already burned)", c.credentialFile, err)
+		return
+	}
+	log.Printf("connector: per-target credential stored at %s", c.credentialFile)
 }
 
 // WithAgentInfo sets the identity frame (RUNNER-REFLUX-SPEC §5) emitted once
@@ -160,17 +216,26 @@ func (c *Client) Run(ctx context.Context) {
 }
 
 func (c *Client) connectAndServe(ctx context.Context) error {
+	// Bearer resolved per dial: after the first enroll-token handshake the
+	// persisted per-target credential wins; before it, the enroll token
+	// itself; legacy deployments keep the shared token.
 	header := map[string][]string{
-		"Authorization": {"Bearer " + c.authToken},
+		"Authorization": {"Bearer " + c.currentToken()},
 		"X-Target-Name": {c.targetName},
 	}
 	if c.vendor != "" && c.region != "" {
 		header["X-Target-Vendor"] = []string{c.vendor}
 		header["X-Target-Region"] = []string{c.region}
 	}
-	conn, _, err := websocket.DefaultDialer.DialContext(ctx, c.hubURL, header)
+	conn, resp, err := websocket.DefaultDialer.DialContext(ctx, c.hubURL, header)
 	if err != nil {
 		return err
+	}
+	// Enroll-token handshake: the hub consumed the one-time token and hands
+	// back the per-target credential on the 101 response; store it so every
+	// later dial (reconnects here, cold starts elsewhere) uses it.
+	if resp != nil {
+		c.persistCredential(resp.Header.Get("X-SDP-Runner-Credential"))
 	}
 	defer conn.Close()
 	c.conn = conn

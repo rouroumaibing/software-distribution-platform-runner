@@ -125,7 +125,7 @@ func TestRerunHandlerResetsTargetAndDeletesDownstream(t *testing.T) {
 func TestRerunHandlerRevivesFailedRun(t *testing.T) {
 	// Without reviving the (terminal) PipelineRun the reconciler short-circuits
 	// and the reset TaskRun is never scheduled — the rerun would silently do
-	// nothing. This was caught by the live E2E run (2026-09-24).
+	// nothing. This was caught by the live E2E run.
 	pr := &sdpv1alpha1.PipelineRun{
 		ObjectMeta: metav1.ObjectMeta{Name: "pr9", Namespace: "ns"},
 		Spec: sdpv1alpha1.PipelineRunSpec{
