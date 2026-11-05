@@ -8,7 +8,7 @@ basic:
 
 image:
   imageAddr: harbor.sdpworkflow.com/sdp/software-distribution-platform-runner:v0.0.1
-  pullPolicy: Always
+  pullPolicy: IfNotPresent
   # pod spec 级拉取凭据名（与 console chart 同款字段）；runner 用自定义 SA
   # sdp-runner，不吃 default SA 的凭据注入，必须在此显式声明。
   # 留空 = 不渲染 imagePullSecrets（registry 无鉴权场景）。
