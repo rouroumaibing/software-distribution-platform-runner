@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -82,6 +83,9 @@ type Client struct {
 
 	conn   *websocket.Conn
 	outbox chan Message
+
+	// dropped counts frames discarded because the outbox was full (see Send).
+	dropped atomic.Uint64
 }
 
 func New(hubURL, targetName, authToken string) *Client {
@@ -180,14 +184,26 @@ func (c *Client) OnConnect(fn OnConnectFunc) {
 
 // Send queues a message for delivery to the Hub; safe to call from
 // multiple goroutines (e.g. several TaskRun reconciles reporting status
-// concurrently).
+// concurrently). Non-blocking: when the outbox is full the frame is
+// dropped and counted, never parked on — every frame this client emits is
+// best-effort telemetry (status/log/heartbeat/agent_info) and a reconnect
+// re-asserts state via the OnConnect resync (C-05), so blocking here would
+// pile up goroutines on every report path during a connection stall.
 func (c *Client) Send(t runnerapi.MessageType, payload any) error {
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
-	c.outbox <- runnerapi.Message{Type: t, Payload: raw}
-	return nil
+	select {
+	case c.outbox <- runnerapi.Message{Type: t, Payload: raw}:
+		return nil
+	default:
+		n := c.dropped.Add(1)
+		if n == 1 || n%100 == 0 {
+			log.Printf("connector: outbox full, dropped %s frame (total dropped: %d)", t, n)
+		}
+		return nil
+	}
 }
 
 // Run blocks until ctx is cancelled, maintaining the connection and
@@ -272,6 +288,10 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 		case <-heartbeat.C:
 			_ = c.Send(MessageHeartbeat, map[string]string{"target": c.targetName})
 		case msg := <-c.outbox:
+			// A stalled (half-open) connection must surface as an error and
+			// trigger reconnect instead of wedging the pump forever; 10s is
+			// well above normal RTT jitter (see features/connector-backpressure.md).
+			_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 			if err := conn.WriteJSON(msg); err != nil {
 				return err
 			}
