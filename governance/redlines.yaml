@@ -1,0 +1,31 @@
+# runner 项目机器判据（harness-workflow audit/scripts/ 从这里读取）。
+# GOVERNANCE_DIR 指向 governance/ 时生效；每段按项目实际调整，调整属配置变更须人审。
+# 本文件是起步最小集，不是权威策略。
+
+schema_version: 1
+
+forbidden_words: [适当, 尽量, 等等, 大概, 合理, 关键, 重要, 必要时]
+
+risk_patterns:
+  - path_glob: "**/executor/**"
+  - path_glob: "**/ws/**"
+  - pattern: '\b(os\.Exec|exec\.Command)\b'
+    skip_paths: &not_prose ["**/*.md", "**/*.txt", "**/*.rst"]
+
+ai_writable_paths:
+  - "docs/"
+  - "ai-reports/"
+
+thresholds:
+  ai_writable_max_bytes: 65536
+  verification_stamp:
+    lookback: 50
+    min_ratio: 0.8
+  max_consecutive_gate_failures: 3
+
+protected_paths:
+  - "governance/**"
+  - ".github/workflows/**"
+review_required_paths:
+  - "internal/executor/**"
+  - "internal/ws/**"

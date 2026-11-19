@@ -1,0 +1,15 @@
+# runner verify 资产（声明式 manifest，schema 见 harness-workflow schemas.md）。
+# 给出怎么 build、怎么起、done 长什么样；done 判据机器可判定，不接受"看起来正常"。
+
+schema_version: 1
+build: "make build"
+start: "make start-dev"
+done:
+  - command: "go test ./..."
+    evidence: "evidence/test.log"
+  - command: "bash scripts/e2e-verify.sh"
+    evidence: "evidence/*/manifest.json"
+hands:
+  driver: "scripts/e2e-verify.sh 经 hub ops/runners 查 agent 在线 + 心跳新鲜（WS 回连外部事实）；go test 为 cheap 层；hub 回流未闭环项不作判据"
+  feature_map: "e2e-verify.sh 的 runner 注册（online + 心跳 <120s）即 rubric；internal/ 执行/回连路径契约场景为 cheap 层"
+timeout_s: 600
