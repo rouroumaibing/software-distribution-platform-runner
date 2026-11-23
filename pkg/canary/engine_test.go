@@ -125,19 +125,37 @@ func TestTimedPauseHoldsUntilElapsed(t *testing.T) {
 	}
 	ro.Status.CurrentStepIndex = 1
 	ro.Status.CurrentWeight = 50
-	// Entry annotation belongs to another step (or is missing): fresh pause, stays Paused.
-	ro.Annotations = map[string]string{PauseStartAnnotation: FormatPauseStart(0, time.Now())}
+	// No Status clock: fresh pause, stays Paused.
 	d := Evaluate(ro, 2, 2, 4, true)
 	if d.Phase != sdpv1alpha1.RolloutPaused {
 		t.Fatalf("fresh pause should stay Paused, got %s", d.Phase)
 	}
-	// Elapsed but unhealthy: must not advance.
-	ro.Annotations[PauseStartAnnotation] = FormatPauseStart(1, time.Now().Add(-time.Minute))
+	if d.RequeueAfter != 30*time.Second {
+		t.Fatalf("pause should requeue after its duration, got %v", d.RequeueAfter)
+	}
+	// An elapsed clock recorded for a different step does not apply.
+	elapsed := metav1.NewTime(time.Now().Add(-time.Minute))
+	ro.Status.PauseStartTime = &elapsed
+	ro.Status.PauseStepIndex = 0
+	d = Evaluate(ro, 2, 2, 4, true)
+	if d.Phase != sdpv1alpha1.RolloutPaused {
+		t.Fatalf("cross-step clock must not advance the pause, got %s", d.Phase)
+	}
+	// Elapsed clock for this step but unhealthy: must not advance.
+	ro.Status.PauseStepIndex = 1
 	d = Evaluate(ro, 2, 2, 4, false)
 	if d.Phase != sdpv1alpha1.RolloutPaused {
 		t.Fatalf("unhealthy pause must not advance, got %s", d.Phase)
 	}
+	// Healthy but not yet elapsed: stays Paused.
+	recent := metav1.Now()
+	ro.Status.PauseStartTime = &recent
+	d = Evaluate(ro, 2, 2, 4, true)
+	if d.Phase != sdpv1alpha1.RolloutPaused {
+		t.Fatalf("unelapsed pause must not advance, got %s", d.Phase)
+	}
 	// Elapsed + healthy: advances to the next step.
+	ro.Status.PauseStartTime = &elapsed
 	d = Evaluate(ro, 2, 2, 4, true)
 	if d.CurrentStepIndex != 2 {
 		t.Fatalf("elapsed pause should advance to step 2, got %d", d.CurrentStepIndex)

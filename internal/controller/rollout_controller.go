@@ -1,4 +1,4 @@
-// RolloutReconciler implements progressive delivery for Deploy-type tasks.
+// RolloutReconciler implements progressive delivery (canary) for Release tasks.
 // For each Rollout CR (created by the TaskRun controller) it manages a stable
 // Deployment (WorkloadRef, StableImage) and a canary Deployment
 // (WorkloadRef-canary, CanaryImage) behind a single SDP-managed Service, then
@@ -51,16 +51,9 @@ const (
 	managedByRollout = "rollout"
 )
 
-// Operator-control annotations. The hub relays pause/promote/rollback
-// commands via the gateway; the dispatch handler stamps annRolloutAction on
-// the Rollout, and the reconciler consumes it here (applying the command to
-// Status) and clears it — keeping every Rollout write inside the reconciler.
-const (
-	annRolloutAction  = "sdp.io/rollout-action"  // one-shot command: pause | promote | rollback
-	annRolloutPaused  = "sdp.io/rollout-paused"  // hold flag: stay at the current weight
-	annRolloutAborted = "sdp.io/rollout-aborted" // terminal flag: canary back to 0
-	annRolloutOper    = "sdp.io/rollout-operator"
-)
+// Operator control intent lives in Rollout.Spec.DesiredAction (written only
+// by the dispatch handler). The legacy annotation keys are defined together
+// in api/v1alpha1 and are read here only as a compatibility fallback.
 
 // RolloutReconciler is registered with the manager in cmd/runner/main.go.
 type RolloutReconciler struct {
@@ -82,19 +75,17 @@ func (r *RolloutReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		ro.Status.StartTime = &now
 	}
 
-	// Operator control: a pause/promote/rollback command stamped by the
-	// dispatch handler takes precedence over the automatic walk. It is
-	// applied here and the annotation cleared (a metadata update, which
-	// re-triggers this reconcile so the hold flags below take over).
-	if acted, err := r.applyControlCommand(ctx, &ro); err != nil || acted {
+	// Operator control intent is consumed here. Spec.DesiredAction is the
+	// single write path; the legacy action annotation is read only when the
+	// Spec field is empty. One-shot commands are cleared after being applied.
+	if acted, err := r.applyDesiredAction(ctx, &ro); err != nil || acted {
 		return ctrl.Result{RequeueAfter: healthCheckInterval}, err
 	}
 
-	// Terminal hold: an operator rollback pins the canary at 0% and marks
-	// the rollout RolledBack (decision #7 — a completed revert is a terminal
-	// state of its own, moved off Degraded); nothing else
-	// progresses after that.
-	if ro.Annotations[annRolloutAborted] == "true" {
+	// Terminal hold (compatibility): a rollback annotation left by an older
+	// runner pins the canary at 0%. New commands set Status.Phase = RolledBack
+	// in applyDesiredAction and are held by the terminal-phase branch below.
+	if ro.Annotations[sdpv1alpha1.AnnRolloutAborted] == "true" {
 		total := r.ensureWorkload(ctx, &ro)
 		canaryDep := r.ensureCanary(ctx, &ro, total)
 		r.applyDecision(ctx, &ro, canary.Decision{
@@ -112,11 +103,14 @@ func (r *RolloutReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		if ro.Status.CompletionTime == nil {
 			ro.Status.CompletionTime = &now
 		}
+		clearPauseTiming(&ro)
 		return ctrl.Result{}, r.Status().Update(ctx, &ro)
 	}
 
-	// Paused hold: stay at the current step/weight until promoted.
-	if ro.Annotations[annRolloutPaused] == "true" {
+	// Paused hold: a persistent Pause intent (or the legacy annotation) keeps
+	// the rollout at its observed step/weight until a promote/rollback.
+	if ro.Spec.DesiredAction == sdpv1alpha1.RolloutActionPause ||
+		(ro.Spec.DesiredAction == "" && ro.Annotations[sdpv1alpha1.AnnRolloutPaused] == "true") {
 		total := r.ensureWorkload(ctx, &ro)
 		canaryDep := r.ensureCanary(ctx, &ro, total)
 		weight := ro.Status.CurrentWeight
@@ -141,24 +135,37 @@ func (r *RolloutReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, nil
 	}
 
-	// Timed step pause: stamp the entry time (annotation, per step index) so
-	// the engine can resume automatically once the pause duration elapses;
-	// the metadata update re-triggers this reconcile.
+	// Timed step pause: the entry clock lives in Status. It is stamped there
+	// on first entry; a pre-existing pause-start annotation is migrated into
+	// Status once and then left untouched.
 	if step := currentStep(&ro); step != nil && step.Pause != nil && step.Pause.Duration != nil {
-		if _, _, ok := canary.ParsePauseStart(ro.Annotations[canary.PauseStartAnnotation]); !ok {
-			var fresh sdpv1alpha1.Rollout
-			if err := r.Get(ctx, req.NamespacedName, &fresh); err == nil {
-				base := fresh.DeepCopy()
-				if fresh.Annotations == nil {
-					fresh.Annotations = map[string]string{}
-				}
-				fresh.Annotations[canary.PauseStartAnnotation] = canary.FormatPauseStart(ro.Status.CurrentStepIndex, time.Now())
-				if err := r.Patch(ctx, &fresh, client.MergeFrom(base)); err != nil {
+		if ro.Status.PauseStartTime == nil {
+			migrated := false
+			if idx, startedAt, ok := canary.ParsePauseStart(ro.Annotations[canary.PauseStartAnnotation]); ok &&
+				idx == ro.Status.CurrentStepIndex {
+				started := metav1.NewTime(startedAt)
+				ro.Status.PauseStartTime = &started
+				ro.Status.PauseStepIndex = idx
+				migrated = true
+			} else {
+				now := metav1.Now()
+				ro.Status.PauseStartTime = &now
+				ro.Status.PauseStepIndex = ro.Status.CurrentStepIndex
+			}
+			if err := r.Status().Update(ctx, &ro); err != nil {
+				return ctrl.Result{}, err
+			}
+			if migrated {
+				base := ro.DeepCopy()
+				delete(ro.Annotations, canary.PauseStartAnnotation)
+				if err := r.Patch(ctx, &ro, client.MergeFrom(base)); err != nil {
 					return ctrl.Result{}, err
 				}
-				return ctrl.Result{RequeueAfter: step.Pause.Duration.Duration}, nil
 			}
+			return ctrl.Result{RequeueAfter: step.Pause.Duration.Duration}, nil
 		}
+	} else {
+		clearPauseTiming(&ro)
 	}
 
 	total := r.ensureWorkload(ctx, &ro)
@@ -191,6 +198,7 @@ func (r *RolloutReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		ro.Status.Phase = sdpv1alpha1.RolloutRolledBack
 		now := metav1.Now()
 		ro.Status.CompletionTime = &now
+		clearPauseTiming(&ro)
 		metrics.Alert("rollout", ro.Name, "canary replica failure")
 		if err := r.Status().Update(ctx, &ro); err != nil {
 			return ctrl.Result{}, err
@@ -199,6 +207,9 @@ func (r *RolloutReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 
 	decision := canary.Evaluate(&ro, canaryReady, canaryDesired, total, healthy)
+	if decision.CurrentStepIndex != ro.Status.CurrentStepIndex {
+		clearPauseTiming(&ro)
+	}
 	r.applyDecision(ctx, &ro, decision, canaryDep, total)
 
 	ro.Status.Phase = decision.Phase
@@ -443,6 +454,14 @@ func currentStep(ro *sdpv1alpha1.Rollout) *sdpv1alpha1.CanaryStep {
 	return nil
 }
 
+// clearPauseTiming drops the timed-pause clock from Status. It runs when the
+// step walk leaves the timed pause and when promote/rollback changes the step,
+// so a clock from an earlier pause cannot carry into a later one.
+func clearPauseTiming(ro *sdpv1alpha1.Rollout) {
+	ro.Status.PauseStartTime = nil
+	ro.Status.PauseStepIndex = 0
+}
+
 func (r *RolloutReconciler) scaleDeployment(ctx context.Context, dep *appsv1.Deployment, replicas int32) {
 	if dep.Spec.Replicas != nil && *dep.Spec.Replicas == replicas {
 		return
@@ -563,26 +582,35 @@ func (r *RolloutReconciler) SetupWithManager(mgr ctrl.Manager) error {
 
 // --- helpers ---
 
-// applyControlCommand consumes a one-shot operator command stamped in
-// annRolloutAction by the dispatch handler (relayed from the hub). It applies
-// the command to Status and clears the annotation, returning true when a
-// command was processed. Keep semantics aligned with the canary engine:
-// pause holds at the current weight, promote advances one step (or completes
-// the rollout past the last step), rollback reverts to 0% canary and aborts.
-func (r *RolloutReconciler) applyControlCommand(ctx context.Context, ro *sdpv1alpha1.Rollout) (bool, error) {
-	action := ro.Annotations[annRolloutAction]
-	if action == "" {
+// applyDesiredAction consumes the operator control intent. The single write
+// path is Rollout.Spec.DesiredAction; the legacy action annotation is read
+// only as a compatibility fallback. It returns true when it applied an
+// action (Status was written), so the caller requeues and the hold branches
+// take over on the next pass.
+func (r *RolloutReconciler) applyDesiredAction(ctx context.Context, ro *sdpv1alpha1.Rollout) (bool, error) {
+	intent := ro.Spec.DesiredAction
+	specDriven := intent != ""
+	operator := ro.Spec.DesiredActionOperator
+
+	// Compatibility read: a stale annotation left by an older sender is
+	// cleared, and only consulted when the Spec field carries no intent.
+	// No new intent is ever written as an annotation here.
+	legacyAction := ro.Annotations[sdpv1alpha1.AnnRolloutAction]
+	legacyOperator := ro.Annotations[sdpv1alpha1.AnnRolloutOperator]
+	if legacyAction != "" {
+		base := ro.DeepCopy()
+		delete(ro.Annotations, sdpv1alpha1.AnnRolloutAction)
+		delete(ro.Annotations, sdpv1alpha1.AnnRolloutOperator)
+		if err := r.Patch(ctx, ro, client.MergeFrom(base)); err != nil {
+			return true, err
+		}
+		if !specDriven {
+			intent = sdpv1alpha1.RolloutAction(legacyAction)
+			operator = legacyOperator
+		}
+	}
+	if intent == "" {
 		return false, nil
-	}
-	operator := ro.Annotations[annRolloutOper]
-	clear := func() error {
-		patch := client.MergeFrom(ro.DeepCopy())
-		delete(ro.Annotations, annRolloutAction)
-		delete(ro.Annotations, annRolloutOper)
-		return r.Patch(ctx, ro, patch)
-	}
-	if err := clear(); err != nil {
-		return true, err
 	}
 
 	by := " by operator"
@@ -590,40 +618,57 @@ func (r *RolloutReconciler) applyControlCommand(ctx context.Context, ro *sdpv1al
 		by = " by " + operator
 	}
 
-	switch sdpv1alpha1.RolloutAction(action) {
+	switch intent {
 	case sdpv1alpha1.RolloutActionPause:
-		// Pausing a finished/degraded rollout is a no-op; otherwise hold.
+		// Pause is a persistent desired state: keep Spec.DesiredAction so the
+		// hold branch keeps the rollout at its observed weight.
+		if ro.Status.Phase == sdpv1alpha1.RolloutPaused {
+			return false, nil // already applied; the hold branch owns it
+		}
 		if ro.Status.Phase == sdpv1alpha1.RolloutHealthy || ro.Status.Phase == sdpv1alpha1.RolloutDegraded {
 			ro.Status.Message = "pause ignored: rollout already " + string(ro.Status.Phase)
-		} else {
-			patchMeta := client.MergeFrom(ro.DeepCopy())
-			if ro.Annotations == nil {
-				ro.Annotations = map[string]string{}
+			if specDriven {
+				if err := r.clearDesiredAction(ctx, ro); err != nil {
+					return true, err
+				}
 			}
-			ro.Annotations[annRolloutPaused] = "true"
-			if err := r.Patch(ctx, ro, patchMeta); err != nil {
+			break
+		}
+		if !specDriven {
+			// Compatibility migration: record the consumed legacy command
+			// as the Spec intent. Legacy annotations stay read-only here.
+			base := ro.DeepCopy()
+			ro.Spec.DesiredAction = sdpv1alpha1.RolloutActionPause
+			ro.Spec.DesiredActionOperator = operator
+			if err := r.Patch(ctx, ro, client.MergeFrom(base)); err != nil {
 				return true, err
 			}
-			ro.Status.Phase = sdpv1alpha1.RolloutPaused
-			ro.Status.Message = "paused" + by
 		}
+		ro.Status.Phase = sdpv1alpha1.RolloutPaused
+		ro.Status.Message = "paused" + by
 	case sdpv1alpha1.RolloutActionPromote:
-		// Promoting an aborted rollout would undo the rollback — refuse.
-		if ro.Annotations[annRolloutAborted] == "true" {
+		if specDriven {
+			if err := r.clearDesiredAction(ctx, ro); err != nil {
+				return true, err
+			}
+		}
+		// A promote on a rolled-back rollout would undo the rollback.
+		if ro.Annotations[sdpv1alpha1.AnnRolloutAborted] == "true" ||
+			ro.Status.Phase == sdpv1alpha1.RolloutRolledBack {
 			ro.Status.Message = "promote ignored: rollout was rolled back"
 			break
 		}
-		// Clear the paused hold.
-		if ro.Annotations[annRolloutPaused] == "true" {
-			patchMeta := client.MergeFrom(ro.DeepCopy())
-			delete(ro.Annotations, annRolloutPaused)
-			if err := r.Patch(ctx, ro, patchMeta); err != nil {
+		// Drop the legacy paused flag so the hold branch doesn't re-engage.
+		if ro.Annotations[sdpv1alpha1.AnnRolloutPaused] == "true" {
+			base := ro.DeepCopy()
+			delete(ro.Annotations, sdpv1alpha1.AnnRolloutPaused)
+			if err := r.Patch(ctx, ro, client.MergeFrom(base)); err != nil {
 				return true, err
 			}
 		}
+		clearPauseTiming(ro)
 		steps := len(ro.Spec.Steps)
 		if int(ro.Status.CurrentStepIndex) >= steps {
-			// Already past the last step: promoting completes the rollout.
 			ro.Status.Phase = sdpv1alpha1.RolloutHealthy
 			now := metav1.Now()
 			if ro.Status.CompletionTime == nil {
@@ -632,8 +677,7 @@ func (r *RolloutReconciler) applyControlCommand(ctx context.Context, ro *sdpv1al
 			ro.Status.Message = "promoted to completion" + by
 		} else {
 			// Advance one step; pre-set the weight to the next step's target
-			// so the engine scales straight to it (same convention as
-			// canary.Evaluate's "healthy at weight, advancing" branch).
+			// so the engine scales straight to it.
 			next := ro.Status.CurrentStepIndex + 1
 			weight := ro.Status.CurrentWeight
 			if int(next) < steps {
@@ -647,25 +691,55 @@ func (r *RolloutReconciler) applyControlCommand(ctx context.Context, ro *sdpv1al
 			ro.Status.Message = "promoted" + by
 		}
 	case sdpv1alpha1.RolloutActionRollback:
-		patchMeta := client.MergeFrom(ro.DeepCopy())
-		if ro.Annotations == nil {
-			ro.Annotations = map[string]string{}
+		if specDriven {
+			if err := r.clearDesiredAction(ctx, ro); err != nil {
+				return true, err
+			}
 		}
-		delete(ro.Annotations, annRolloutPaused)
-		ro.Annotations[annRolloutAborted] = "true"
-		if err := r.Patch(ctx, ro, patchMeta); err != nil {
-			return true, err
+		clearPauseTiming(ro)
+		total := r.ensureWorkload(ctx, ro)
+		canaryDep := r.ensureCanary(ctx, ro, total)
+		r.applyDecision(ctx, ro, canary.Decision{
+			Phase:          sdpv1alpha1.RolloutRolledBack,
+			CurrentWeight:  0,
+			CanaryReplicas: 0,
+			StableReplicas: total,
+			Message:        "rolled back" + by,
+		}, canaryDep, total)
+		ro.Status.Phase = sdpv1alpha1.RolloutRolledBack
+		ro.Status.CurrentWeight = 0
+		ro.Status.CanaryReplicas = 0
+		ro.Status.StableReplicas = total
+		now := metav1.Now()
+		if ro.Status.CompletionTime == nil {
+			ro.Status.CompletionTime = &now
 		}
-		ro.Status.Phase = sdpv1alpha1.RolloutRollingBack
-		ro.Status.Message = "rollback requested" + by
+		ro.Status.Message = "rolled back" + by
 	default:
-		ro.Status.Message = "ignored unknown rollout action " + action
+		ro.Status.Message = "ignored unknown rollout action " + string(intent)
+		if specDriven {
+			if err := r.clearDesiredAction(ctx, ro); err != nil {
+				return true, err
+			}
+		}
 	}
 
 	if err := r.Status().Update(ctx, ro); err != nil {
 		return true, err
 	}
 	return true, nil
+}
+
+// clearDesiredAction resets a one-shot intent after it has been consumed.
+// The reconciler is the only writer that clears the field.
+func (r *RolloutReconciler) clearDesiredAction(ctx context.Context, ro *sdpv1alpha1.Rollout) error {
+	if ro.Spec.DesiredAction == "" && ro.Spec.DesiredActionOperator == "" {
+		return nil
+	}
+	base := ro.DeepCopy()
+	ro.Spec.DesiredAction = ""
+	ro.Spec.DesiredActionOperator = ""
+	return r.Patch(ctx, ro, client.MergeFrom(base))
 }
 
 func weightReplicas(weight, total int32) int32 {

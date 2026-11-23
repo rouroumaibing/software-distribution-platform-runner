@@ -13,6 +13,8 @@ import (
 //     An optional Canary sub-spec drives a progressive rollout.
 //   - Approval: pause the pipeline and wait for an external decision relayed from
 //     the hub.
+//   - Test: run a test/verification command as a pod-executed script, judged
+//     by exit code (same execution path as Build).
 type PipelineTaskType string
 
 const (
@@ -130,7 +132,7 @@ type PipelineTaskSpec struct {
 	// Name must be unique within the PipelineRun; referenced by DependsOn.
 	Name string `json:"name"`
 
-	// +kubebuilder:validation:Enum=Build;Release;Approval
+	// +kubebuilder:validation:Enum=Build;Release;Approval;Test
 	Type PipelineTaskType `json:"type"`
 
 	// Stage groups this task for UI display and sequencing. Tasks sharing a
@@ -276,12 +278,12 @@ type TaskRunStatusSummary struct {
 	CompletionTime *metav1.Time `json:"completionTime,omitempty"`
 	Message        string       `json:"message,omitempty"`
 
-	// Rollout is the live progressive-delivery snapshot for Deploy-type
-	// tasks (RUNNER-REFLUX-SPEC §3): the PipelineRun controller fills it
+	// Rollout is the live canary snapshot for Release tasks
+	// (RUNNER-REFLUX-SPEC §3): the PipelineRun controller fills it
 	// from the owning Rollout CR's status so the hub can persist
 	// rollout_runs with a real CurrentWeight instead of the console
 	// guessing it from task completion counts. Optional — absent for
-	// non-deploy tasks and for old runners (omitempty keeps the wire
+	// non-Release tasks and for old runners (omitempty keeps the wire
 	// format backward compatible).
 	Rollout *RolloutStatusSummary `json:"rollout,omitempty"`
 }

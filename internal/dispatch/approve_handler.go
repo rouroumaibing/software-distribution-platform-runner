@@ -6,22 +6,20 @@ import (
 	"fmt"
 	"log"
 
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	sdpv1alpha1 "github.com/rouroumaibing/software-distribution-platform-runner/api/v1alpha1"
 )
 
 // ApproverHandler receives MessageApproveTask frames and records the decision
-// on the matching TaskRun's Status.Approval. The PipelineRun controller
-// watches TaskRun status and either advances the DAG (enough approvals) or
-// fails the run (a rejection).
+// as an intent on the matching TaskRun. TaskRunReconciler consumes the intent
+// into Status.Approval; the PipelineRun controller then advances (enough
+// approvals) or fails the run (a rejection). The handler never writes Status.
 type ApproverHandler struct {
 	Client client.Client
 }
 
-// Handle finds the paused Approval TaskRun and applies the decision.
+// Handle appends the decision to the TaskRun's approval-intent annotation.
 func (h *ApproverHandler) Handle(payload json.RawMessage) error {
 	var p sdpv1alpha1.ApproveTaskPayload
 	if err := json.Unmarshal(payload, &p); err != nil {
@@ -46,45 +44,34 @@ func (h *ApproverHandler) Handle(payload json.RawMessage) error {
 	}
 	tr := list.Items[0]
 
-	// Make sure the approval status is initialized (the TaskRun controller
-	// also does this, but a late approval arriving before the first
-	// reconcile shouldn't panic).
-	if tr.Status.Approval == nil {
-		tr.Status.Approval = &sdpv1alpha1.ApprovalStatus{
-			TaskName:      p.TaskName,
-			RequestedAt:   metav1.Now(),
-			RequiredCount: requiredCount(&tr),
+	var decisions []sdpv1alpha1.ApprovalDecisionRecord
+	if raw := tr.Annotations[sdpv1alpha1.AnnApprovalDecision]; raw != "" {
+		if err := json.Unmarshal([]byte(raw), &decisions); err != nil {
+			return fmt.Errorf("dispatch: invalid approval decision intent: %w", err)
 		}
 	}
-
-	if p.Rejected {
-		tr.Status.Approval.RejectedBy = p.Approver
-		tr.Status.Phase = sdpv1alpha1.TaskRunFailed
-		tr.Status.Message = "rejected by " + p.Approver
-	} else {
-		for _, a := range tr.Status.Approval.ApprovedBy {
-			if a == p.Approver {
-				return nil // idempotent: same approver twice is a no-op
-			}
-		}
-		tr.Status.Approval.ApprovedBy = append(tr.Status.Approval.ApprovedBy, p.Approver)
-		if int32(len(tr.Status.Approval.ApprovedBy)) >= tr.Status.Approval.RequiredCount {
-			tr.Status.Phase = sdpv1alpha1.TaskRunSucceeded
-			tr.Status.Message = "approved"
+	for _, d := range decisions {
+		if d.Approver == p.Approver {
+			return nil // idempotent: same approver twice is a no-op
 		}
 	}
-
-	if err := h.Client.Status().Update(context.Background(), &tr); err != nil && !apierrors.IsNotFound(err) {
+	decisions = append(decisions, sdpv1alpha1.ApprovalDecisionRecord{
+		Approver: p.Approver, Rejected: p.Rejected,
+	})
+	raw, err := json.Marshal(decisions)
+	if err != nil {
 		return err
 	}
-	log.Printf("dispatch: applied decision for %s/%s approver=%s rejected=%v",
+
+	base := tr.DeepCopy()
+	if tr.Annotations == nil {
+		tr.Annotations = map[string]string{}
+	}
+	tr.Annotations[sdpv1alpha1.AnnApprovalDecision] = string(raw)
+	if err := h.Client.Patch(context.Background(), &tr, client.MergeFrom(base)); err != nil {
+		return err
+	}
+	log.Printf("dispatch: approval intent for %s/%s approver=%s rejected=%v",
 		p.PipelineRunName, p.TaskName, p.Approver, p.Rejected)
 	return nil
-}
-
-func requiredCount(tr *sdpv1alpha1.TaskRun) int32 {
-	if tr.Spec.ApprovalConfig != nil {
-		return tr.Spec.ApprovalConfig.RequiredApprovals
-	}
-	return 1
 }

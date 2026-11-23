@@ -29,7 +29,7 @@ type TaskRunSpec struct {
 
 	TaskName string `json:"taskName"`
 
-	// +kubebuilder:validation:Enum=Build;Release;Approval
+	// +kubebuilder:validation:Enum=Build;Release;Approval;Test
 	Type PipelineTaskType `json:"type"`
 
 	Image string `json:"image,omitempty"`

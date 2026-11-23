@@ -65,9 +65,9 @@ func Evaluate(ro *sdpv1alpha1.Rollout, canaryReady, canaryDesired, totalReplicas
 	// Pause step: hold at the current weight. An indefinite pause waits for
 	// an external resume (not implemented in M1) — it just stays Paused. A
 	// Duration-carrying pause resumes automatically once the duration has
-	// elapsed since entry and the canary is healthy at the held weight. Entry
-	// time is stamped by the reconciler in PauseStartAnnotation as
-	// "<stepIndex>|<RFC3339>", per step so each pause gets its own clock.
+	// elapsed since the recorded entry time and the canary is healthy at the
+	// held weight. The clock lives in Status: PauseStartTime must be set and
+	// PauseStepIndex must equal CurrentStepIndex for that clock to apply.
 	if step.Pause != nil {
 		d := Decision{
 			Phase:            sdpv1alpha1.RolloutPaused,
@@ -79,9 +79,9 @@ func Evaluate(ro *sdpv1alpha1.Rollout, canaryReady, canaryDesired, totalReplicas
 		}
 		if step.Pause.Duration != nil {
 			d.RequeueAfter = step.Pause.Duration.Duration
-			if idx, startedAt, ok := ParsePauseStart(ro.Annotations[PauseStartAnnotation]); ok &&
-				idx == status.CurrentStepIndex &&
-				time.Since(startedAt) >= step.Pause.Duration.Duration && healthy {
+			if status.PauseStartTime != nil &&
+				status.PauseStepIndex == status.CurrentStepIndex &&
+				time.Since(status.PauseStartTime.Time) >= step.Pause.Duration.Duration && healthy {
 				d.Phase = sdpv1alpha1.RolloutProgressing
 				d.CurrentStepIndex = status.CurrentStepIndex + 1
 				d.Message = "pause elapsed, advancing"
@@ -213,16 +213,19 @@ func healthInterval(spec sdpv1alpha1.RolloutSpec) time.Duration {
 	return time.Duration(spec.HealthCheck.IntervalSeconds) * time.Second
 }
 
-// PauseStartAnnotation stamps a timed pause's entry time so the engine can
-// tell an elapsed pause from a fresh one. Value: "<stepIndex>|<RFC3339>".
-// An annotation (not a status field) because it survives CRD pruning without
-// regeneration, and it is per step so each pause step starts its own clock.
+// PauseStartAnnotation is the compatibility key for the legacy timed-pause
+// clock. Its value is "<stepIndex>|<RFC3339>". It is read only when migrating
+// a pre-existing Rollout into the Status clock fields.
 const PauseStartAnnotation = "sdp.io/pause-start"
 
+// FormatPauseStart encodes a step index and instant in the legacy annotation
+// value format; it is used by migration tests.
 func FormatPauseStart(stepIndex int32, t time.Time) string {
 	return fmt.Sprintf("%d|%s", stepIndex, t.UTC().Format(time.RFC3339))
 }
 
+// ParsePauseStart decodes a legacy pause-start annotation value. It is used
+// only by the one-time migration into Rollout.Status.
 func ParsePauseStart(s string) (stepIndex int32, startedAt time.Time, ok bool) {
 	idx, ts, found := strings.Cut(s, "|")
 	if !found {

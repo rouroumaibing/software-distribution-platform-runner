@@ -70,3 +70,19 @@ start-dev:
 
 stop-dev:
 	@bash hack/svc.sh stop
+
+# chart/crds 是 config/crd/bases 的部署副本，变更 API 类型后须同步，避免打包部署用到旧 schema。
+CRD_SRC_DIR := config/crd/bases
+CRD_CHART_DIR := build/$(APP)/charts/software-distribution-platform-$(APP)/crds
+
+.PHONY: sync-crds check-crds
+
+sync-crds:
+	cp $(CRD_SRC_DIR)/*.yaml $(CRD_CHART_DIR)/
+
+check-crds:
+	@for f in $(CRD_SRC_DIR)/*.yaml; do \
+		b=$$(basename $$f); \
+		cmp -s "$$f" "$(CRD_CHART_DIR)/$$b" || { echo "CRD drift: $$b"; exit 1; }; \
+	done
+	@echo "CRD chart copy in sync"

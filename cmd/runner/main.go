@@ -132,7 +132,7 @@ func main() {
 		SelfKubectlImage:    envOr("SDP_UPGRADE_KUBECTL_IMAGE", agentops.DefaultKubectlImage),
 		SelfUpgradeDisabled: os.Getenv("SDP_UPGRADE_DISABLED") == "true",
 	}
-	conn.OnMessage(connector.MessageAgentOp, agentOpHandler.Handle)
+	conn.OnMessage(sdpv1alpha1.MessageAgentOp, agentOpHandler.Handle)
 
 	// G-7：job 内使用的默认镜像全部可经 env 覆盖（受限 registry / 私有 mirror
 	// 环境下可换用可用镜像源，避免开箱即败）。G-6：consume 需要 hub API 地址与可选 token。
@@ -171,15 +171,15 @@ func main() {
 		// the handler map is keyed by message type, overwriting the prior
 		// attempt's handlers which are now tied to a stopped manager.
 		applyHandler := &dispatch.ApplyHandler{Client: mgr.GetClient(), TargetName: targetName}
-		conn.OnMessage(connector.MessageApplyPipelineRun, applyHandler.Handle)
+		conn.OnMessage(sdpv1alpha1.MessageApplyPipelineRun, applyHandler.Handle)
 		approveHandler := &dispatch.ApproverHandler{Client: mgr.GetClient()}
-		conn.OnMessage(connector.MessageApproveTask, approveHandler.Handle)
+		conn.OnMessage(sdpv1alpha1.MessageApproveTask, approveHandler.Handle)
 		rolloutControlHandler := &dispatch.RolloutControlHandler{Client: mgr.GetClient()}
-		conn.OnMessage(connector.MessageRolloutControl, rolloutControlHandler.Handle)
+		conn.OnMessage(sdpv1alpha1.MessageRolloutControl, rolloutControlHandler.Handle)
 		rerunHandler := &dispatch.RerunHandler{Client: mgr.GetClient()}
-		conn.OnMessage(connector.MessageRerunTask, rerunHandler.Handle)
+		conn.OnMessage(sdpv1alpha1.MessageRerunTask, rerunHandler.Handle)
 		cancelHandler := &dispatch.CancelHandler{Client: mgr.GetClient()}
-		conn.OnMessage(connector.MessageCancelPipelineRun, cancelHandler.Handle)
+		conn.OnMessage(sdpv1alpha1.MessageCancelPipelineRun, cancelHandler.Handle)
 
 		// C-05: on every (re)connection, re-assert local state with the Hub so
 		// in-flight work isn't silently lost. The hub runs DrainTarget on

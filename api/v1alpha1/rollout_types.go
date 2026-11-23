@@ -102,7 +102,7 @@ type TrafficRoutingSpec struct {
 }
 
 // RolloutSpec defines the desired state of a Rollout.
-// Created by the PipelineRun/TaskRun controller for Deploy-type tasks, or
+// Created by the PipelineRun/TaskRun controller for Release tasks, or
 // directly by an operator for a standalone progressive deployment.
 type RolloutSpec struct {
 	// WorkloadRef is the name of the Deployment being progressively updated.
@@ -131,6 +131,18 @@ type RolloutSpec struct {
 	// once HealthCheck.FailureThreshold consecutive checks fail.
 	// +kubebuilder:default=true
 	AutoRollback bool `json:"autoRollback,omitempty"`
+
+	// DesiredAction is the operator's control intent. The dispatch handler
+	// writes it; the reconciler applies it to Status and clears one-shot
+	// commands. Empty means no pending intent (automatic step walk). Pause is
+	// a persistent desired state held until a later Promote/Rollback; Promote
+	// advances one step; Rollback reverts to 0% canary and terminates.
+	// +kubebuilder:validation:Enum="";pause;promote;rollback
+	DesiredAction RolloutAction `json:"desiredAction,omitempty"`
+
+	// DesiredActionOperator records who issued DesiredAction, for the status
+	// message / audit. It is set and cleared with DesiredAction.
+	DesiredActionOperator string `json:"desiredActionOperator,omitempty"`
 }
 
 // RolloutStatus defines the observed state of a Rollout.
@@ -149,6 +161,11 @@ type RolloutStatus struct {
 	LastHealthCheckTime *metav1.Time `json:"lastHealthCheckTime,omitempty"`
 	StartTime           *metav1.Time `json:"startTime,omitempty"`
 	CompletionTime      *metav1.Time `json:"completionTime,omitempty"`
+
+	// PauseStartTime is the entry time recorded for the current timed pause step.
+	PauseStartTime *metav1.Time `json:"pauseStartTime,omitempty"`
+	// PauseStepIndex is the step index PauseStartTime belongs to.
+	PauseStepIndex int32 `json:"pauseStepIndex,omitempty"`
 
 	Message string `json:"message,omitempty"`
 
@@ -182,4 +199,31 @@ type RolloutList struct {
 
 func init() {
 	SchemeBuilder.Register(&Rollout{}, &RolloutList{})
+}
+
+// Rollout control annotations are the legacy encoding of operator intents.
+// Current code only reads them as a compatibility fallback when
+// Spec.DesiredAction is empty; it never writes an intent here. New commands
+// go through Spec.DesiredAction.
+const (
+	AnnRolloutAction   = "sdp.io/rollout-action"
+	AnnRolloutPaused   = "sdp.io/rollout-paused"
+	AnnRolloutAborted  = "sdp.io/rollout-aborted"
+	AnnRolloutOperator = "sdp.io/rollout-operator"
+)
+
+// RolloutIntentFromAnnotations resolves the legacy annotation encoding into
+// the same RolloutAction vocabulary as Spec.DesiredAction. It returns empty
+// when no intent is encoded. Compatibility read path only.
+func RolloutIntentFromAnnotations(annotations map[string]string) RolloutAction {
+	if action := annotations[AnnRolloutAction]; action != "" {
+		return RolloutAction(action)
+	}
+	if annotations[AnnRolloutAborted] == "true" {
+		return RolloutActionRollback
+	}
+	if annotations[AnnRolloutPaused] == "true" {
+		return RolloutActionPause
+	}
+	return ""
 }

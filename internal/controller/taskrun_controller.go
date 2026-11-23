@@ -1,11 +1,12 @@
 // TaskRunReconciler is the only piece of code that actually talks to the
-// Job API. Approval-type TaskRuns are deliberately left untouched here —
-// they only advance when the Hub patches Status.Approval, relayed through
-// the connector, not through anything this reconciler does.
+// Job API. Approval-type TaskRuns create no Job: the Hub stamps a decision
+// intent, which this reconciler consumes into Status.Approval.
 package controller
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"sync"
@@ -53,9 +54,20 @@ func (r *TaskRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
+	// A rerun intent is consumed here; the handler only stamps it. This
+	// reconciler is the sole writer of TaskRun status.
+	if done, err := r.applyRerunIntent(ctx, &tr); err != nil || done {
+		return ctrl.Result{}, err
+	}
+
 	// Approval 任务不创建 Job,只是挂起等待外部(Hub)决策。初始化
 	// Status.Approval 让 PipelineRun 控制器能识别到"有节点在等审批"。
 	if tr.Spec.Type == sdpv1alpha1.TaskTypeApproval {
+		// Consume the approval intent stamped by the dispatch handler; it is
+		// the only path that writes a decision into Status.Approval.
+		if done, err := r.applyApprovalIntent(ctx, &tr); err != nil || done {
+			return ctrl.Result{}, err
+		}
 		if tr.Status.Phase == "" {
 			tr.Status.Phase = sdpv1alpha1.TaskRunPending
 		}
@@ -70,8 +82,8 @@ func (r *TaskRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 				RequiredCount: required,
 			}
 		}
-		// 一旦 Hub 已经通过 connector 把 Phase 改成 Succeeded/Failed,
-		// 这里保持不动,让 DAG 继续推进。
+		// 决策意图被消费后 Phase 已是 Succeeded/Failed,这里保持不动,
+		// 让 DAG 继续推进。
 		if tr.Status.Phase == sdpv1alpha1.TaskRunPending {
 			return ctrl.Result{}, r.Status().Update(ctx, &tr)
 		}
@@ -83,7 +95,7 @@ func (r *TaskRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	// 并回填 Rollout.Status,我们再映射回 TaskRun.Status。没有 Canary 的
 	// Release(以及所有 Build 任务)走下方通用 Job 路径。
 	if tr.Spec.Type == sdpv1alpha1.TaskTypeRelease && tr.Spec.RolloutSpec != nil {
-		return r.reconcileDeploy(ctx, &tr)
+		return r.reconcileRollout(ctx, &tr)
 	}
 
 	// 已经有终态了,不用再处理。
@@ -156,11 +168,113 @@ func (r *TaskRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	return ctrl.Result{}, r.Status().Update(ctx, &tr)
 }
 
+// applyApprovalIntent consumes the JSON decision list stamped by the dispatch
+// handler into Status.Approval. It returns true when a decision was applied
+// (Status was written); the handler never writes Status itself.
+func (r *TaskRunReconciler) applyApprovalIntent(ctx context.Context, tr *sdpv1alpha1.TaskRun) (bool, error) {
+	raw := tr.Annotations[sdpv1alpha1.AnnApprovalDecision]
+	if raw == "" {
+		return false, nil
+	}
+	var decisions []sdpv1alpha1.ApprovalDecisionRecord
+	if err := json.Unmarshal([]byte(raw), &decisions); err != nil {
+		return false, fmt.Errorf("taskrun: invalid approval decision intent: %w", err)
+	}
+	base := tr.DeepCopy()
+	delete(tr.Annotations, sdpv1alpha1.AnnApprovalDecision)
+	if err := r.Patch(ctx, tr, client.MergeFrom(base)); err != nil {
+		return true, err
+	}
+
+	if tr.Status.Approval == nil {
+		required := int32(1)
+		if tr.Spec.ApprovalConfig != nil {
+			required = tr.Spec.ApprovalConfig.RequiredApprovals
+		}
+		tr.Status.Approval = &sdpv1alpha1.ApprovalStatus{
+			TaskName:      tr.Spec.TaskName,
+			RequestedAt:   metav1.Now(),
+			RequiredCount: required,
+		}
+	}
+	now := metav1.Now()
+	for _, d := range decisions {
+		if d.Rejected {
+			tr.Status.Approval.RejectedBy = d.Approver
+			tr.Status.Phase = sdpv1alpha1.TaskRunFailed
+			tr.Status.Message = "rejected by " + d.Approver
+			tr.Status.CompletionTime = &now
+			break
+		}
+		seen := false
+		for _, a := range tr.Status.Approval.ApprovedBy {
+			if a == d.Approver {
+				seen = true
+				break
+			}
+		}
+		if !seen {
+			tr.Status.Approval.ApprovedBy = append(tr.Status.Approval.ApprovedBy, d.Approver)
+		}
+	}
+	if tr.Status.Phase != sdpv1alpha1.TaskRunFailed &&
+		int32(len(tr.Status.Approval.ApprovedBy)) >= tr.Status.Approval.RequiredCount {
+		tr.Status.Phase = sdpv1alpha1.TaskRunSucceeded
+		tr.Status.Message = "approved"
+		tr.Status.CompletionTime = &now
+	}
+	return true, r.Status().Update(ctx, tr)
+}
+
+// applyRerunIntent consumes the rerun intent stamped by the dispatch handler:
+// it tears down the target's concrete work, resets its observed status, and
+// clears the intent. The handler only stamps the intent and deletes
+// downstream TaskRuns.
+func (r *TaskRunReconciler) applyRerunIntent(ctx context.Context, tr *sdpv1alpha1.TaskRun) (bool, error) {
+	if tr.Annotations[sdpv1alpha1.AnnRerunRequested] != "true" {
+		return false, nil
+	}
+	operator := tr.Annotations[sdpv1alpha1.AnnRerunOperator]
+	base := tr.DeepCopy()
+	delete(tr.Annotations, sdpv1alpha1.AnnRerunRequested)
+	delete(tr.Annotations, sdpv1alpha1.AnnRerunOperator)
+	if err := r.Patch(ctx, tr, client.MergeFrom(base)); err != nil {
+		return true, err
+	}
+	if tr.Status.JobRef != "" {
+		job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Namespace: tr.Spec.Namespace, Name: tr.Status.JobRef}}
+		if err := r.Delete(ctx, job); err != nil && !apierrors.IsNotFound(err) {
+			return true, err
+		}
+	}
+	if tr.Status.RolloutRef != "" {
+		ro := &sdpv1alpha1.Rollout{ObjectMeta: metav1.ObjectMeta{Namespace: tr.Spec.Namespace, Name: tr.Status.RolloutRef}}
+		if err := r.Delete(ctx, ro); err != nil && !apierrors.IsNotFound(err) {
+			return true, err
+		}
+	}
+	msg := "rerun requested"
+	if operator != "" {
+		msg = "rerun requested by " + operator
+	}
+	tr.Status.Phase = sdpv1alpha1.TaskRunPending
+	tr.Status.JobRef = ""
+	tr.Status.RolloutRef = ""
+	tr.Status.PodName = ""
+	tr.Status.RetryCount = 0
+	tr.Status.ExitCode = nil
+	tr.Status.StartTime = nil
+	tr.Status.CompletionTime = nil
+	tr.Status.Message = msg
+	tr.Status.Approval = nil
+	return true, r.Status().Update(ctx, tr)
+}
+
 // connLogSender adapts connector.Client to logstream.Sender (B-02).
 type connLogSender struct{ conn *connector.Client }
 
 func (s connLogSender) SendLogChunk(p sdpv1alpha1.LogChunkPayload) error {
-	return s.conn.Send(connector.MessageLogChunk, p)
+	return s.conn.Send(sdpv1alpha1.MessageLogChunk, p)
 }
 
 // maybeStreamLogs launches a goroutine that tails the TaskRun's Job pod and
@@ -229,14 +343,14 @@ func (r *TaskRunReconciler) jobPodLog(ctx context.Context, tr *sdpv1alpha1.TaskR
 	return pod.Name, rc, true
 }
 
-// reconcileDeploy makes sure a Rollout CR exists for this Deploy task, then
+// reconcileRollout makes sure a Rollout CR exists for this Release task, then
 // mirrors the Rollout's phase back onto the TaskRun. The actual canary
 // stepping is performed by RolloutReconciler, which owns the stable/canary
 // Deployments.
-func (r *TaskRunReconciler) reconcileDeploy(ctx context.Context, tr *sdpv1alpha1.TaskRun) (ctrl.Result, error) {
+func (r *TaskRunReconciler) reconcileRollout(ctx context.Context, tr *sdpv1alpha1.TaskRun) (ctrl.Result, error) {
 	if tr.Spec.RolloutSpec == nil {
 		tr.Status.Phase = sdpv1alpha1.TaskRunFailed
-		tr.Status.Message = "deploy task has no rolloutSpec"
+		tr.Status.Message = "release task has no rollout spec"
 		return ctrl.Result{}, r.Status().Update(ctx, tr)
 	}
 

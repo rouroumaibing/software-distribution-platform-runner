@@ -8,13 +8,15 @@
 - **构建产物统一落在 `output/` 下**（`make build` 的 `output/bin/runner`、`make package` 的 `output/{charts,images}/` 与交付包），清理即一条 `rm -rf output`；
 - `package` 产物（交付包）默认版本 `v0.0.1`；
 - **起服务**：`make start-dev`（后台运行，pid 文件 + 进程组管理）→ `make stop-dev`；产出镜像 / 交付包用 `make package`；
-- controller-gen 生成文件（`api/v1alpha1/zz_generated.deepcopy.go`、`config/crd/bases/*.yaml`）属构建/打包输入，**clean 不删、保留**；`config/rbac/` 目录当前仅存 `.gitkeep`（无 RBAC 清单，集群侧 RBAC 实际由 chart 承担），同样保留；同一规则的还有 hub 的 swaggo docs（`docs/{docs.go,swagger.json,swagger.yaml}`：已入库、clean 默认保留，见 hub README「swaggo API 文档」）。
+- controller-gen 生成文件（`api/v1alpha1/zz_generated.deepcopy.go`、`config/crd/bases/*.yaml`）属构建/打包输入，**clean 不删、保留**；chart 的 `build/runner/charts/software-distribution-platform-runner/crds/*.yaml` 是这些生成物的部署副本，变更 API 类型后用 `make sync-crds` 同步、`make check-crds` 校验一致性。`config/rbac/` 目录当前仅存 `.gitkeep`（无 RBAC 清单，集群侧 RBAC 实际由 chart 承担），同样保留；同一规则的还有 hub 的 swaggo docs（`docs/{docs.go,swagger.json,swagger.yaml}`：已入库、clean 默认保留，见 hub README「swaggo API 文档」）。
 - **外部主机部署形态**：集群外 runner 目标机自举走 `deploy/cloud-init-runner.yaml.tpl`（cloud-init 模板，由装机管线渲染 `join-bundle` 数据后注入 userdata）；设计/行为规格见 docs 仓 [`runner/features/target-bootstrap.md`](https://github.com/rouroumaibing/software-distribution-platform-docs/blob/main/runner/features/target-bootstrap.md)（权威决策见 [`shared/ADR-0002-runner-install-bootstrap.md`](https://github.com/rouroumaibing/software-distribution-platform-docs/blob/main/shared/ADR-0002-runner-install-bootstrap.md)）。
 
 | make target | 作用 |
 | --- | --- |
 | `make build` | 编译二进制到 `output/bin/runner`（`go build ./cmd/runner`） |
 | `make package` | 组件打包：交叉编译 → 运行时镜像 + docker save + charts → 交付包 `output/software-distribution-platform-runner-<version>.tar.gz`（`build/runner/build.sh`） |
+| `make sync-crds` | 把 `config/crd/bases/*.yaml` 复制到 chart 的 `crds/`，变更 API 类型后执行 |
+| `make check-crds` | 校验 chart CRD 副本与生成物逐字一致，漂移则返回非零 |
 | `make start-dev` | 启动本地开发服务（`hack/svc.sh start`：pid 文件 + 进程组管理，启动前自动清理旧实例；`go run ./cmd/runner`） |
 | `make stop-dev` | 停止本地开发服务（`hack/svc.sh stop`，按 pid 文件 + 进程特征兜底清理） |
 | `make clean` | **先停本地服务**，再删生成物（`output/ .run/ coverage/`、历史位置 `bin/`、仓根裸编译二进制、散落单文件），保留下载依赖与工具链、保留 controller-gen 生成文件 |
@@ -23,17 +25,7 @@
 
 ## 镜像构建环境要求（containerd 路线）
 
-`make package` / `build/runner/build.sh` 在无 docker 的环境（如 CCE 托管节点）走 nerdctl + buildkitd 复用宿主 containerd 构建镜像，对工具链版本有**硬要求**：
-
-| 工具 | 版本要求 | 原因 |
-| --- | --- | --- |
-| nerdctl | **>= 2.x** | `nerdctl save` 默认输出 docker 归档格式，无 `--format` 旗标；`sdp_save` 按此直写 |
-| buildkitd | **>= v0.34** | `--containerd-worker` 为 string 型（true/false/auto），`build.sh` 用 `--containerd-worker=true` 显式赋值拉起；裸旗标会把后面的 `--addr` 当值吃掉导致 `strconv.ParseBool` 崩溃 |
-| containerd | 复用宿主托管实例 | **不要安装 docker / containerd.io**（会与宿主 containerd.service 冲突，CCE 节点尤其如此） |
-
-版本要求的统一权威见 docs 仓 [`shared/BUILD-TOOLCHAIN.md`](https://github.com/rouroumaibing/software-distribution-platform-docs/blob/main/shared/BUILD-TOOLCHAIN.md)。
-
-构建容器内还屏蔽了节点坏环境：`GOPROXY` 经 `SDP_GOPROXY` 覆盖（默认 `https://goproxy.cn,direct`）、`go build` 加 `-buildvcs=false`、`Dockerfile` 的 apt 源经 `APT_MIRROR` 参数化（默认华为云镜像）；详见 BUILD-TOOLCHAIN §2。
+构建工具链的版本要求见 docs 仓 [`shared/BUILD-TOOLCHAIN.md`](https://github.com/rouroumaibing/software-distribution-platform-docs/blob/main/shared/BUILD-TOOLCHAIN.md)。
 
 ## 行为要点（接入侧代理）
 

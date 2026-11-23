@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 
-	batchv1 "k8s.io/api/batch/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -14,15 +13,17 @@ import (
 	sdpv1alpha1 "github.com/rouroumaibing/software-distribution-platform-runner/api/v1alpha1"
 )
 
-// RerunHandler receives MessageRerunTask frames and re-runs a single task
-// (plus, transitively, every downstream task that depends on it) without
-// re-dispatching the whole PipelineRun. This complements the whole-run
-// redispatch path: operators get surgical reruns of a flaky/failed node.
+// RerunHandler receives MessageRerunTask frames and asks the Runner to re-run
+// a single task (plus, transitively, every downstream task that depends on
+// it). It only stamps intents and deletes the downstream TaskRuns: the
+// TaskRun and PipelineRun reconcilers consume the intents and are the sole
+// writers of Status, so a rerun has one status write path.
 type RerunHandler struct {
 	Client client.Client
 }
 
-// Handle resets the target TaskRun and deletes its downstream dependents.
+// Handle stamps rerun intents on the target TaskRun and its owning
+// PipelineRun, then deletes downstream TaskRuns so the DAG recreates them.
 func (h *RerunHandler) Handle(payload json.RawMessage) error {
 	var p sdpv1alpha1.RerunTaskPayload
 	if err := json.Unmarshal(payload, &p); err != nil {
@@ -47,64 +48,37 @@ func (h *RerunHandler) Handle(payload json.RawMessage) error {
 	}
 	tr := list.Items[0]
 
-	// Load the owning PipelineRun so we have the full DAG to compute
-	// transitive downstream dependents.
 	var pr sdpv1alpha1.PipelineRun
 	if err := h.Client.Get(context.Background(),
 		client.ObjectKey{Namespace: tr.Spec.Namespace, Name: tr.Spec.PipelineRunRef}, &pr); err != nil {
 		return err
 	}
 
-	// Tear down the target's concrete work (Job/Rollout) before clearing
-	// status so a half-built object isn't orphaned.
-	if tr.Status.JobRef != "" {
-		job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Namespace: tr.Spec.Namespace, Name: tr.Status.JobRef}}
-		if err := h.Client.Delete(context.Background(), job); err != nil && !apierrors.IsNotFound(err) {
-			return err
-		}
+	// Two intents: the TaskRun resets its own status/rebuilds its work; the
+	// PipelineRun revives a Failed run so the reset task is rescheduled.
+	base := tr.DeepCopy()
+	if tr.Annotations == nil {
+		tr.Annotations = map[string]string{}
 	}
-	if tr.Status.RolloutRef != "" {
-		ro := &sdpv1alpha1.Rollout{ObjectMeta: metav1.ObjectMeta{Namespace: tr.Spec.Namespace, Name: tr.Status.RolloutRef}}
-		if err := h.Client.Delete(context.Background(), ro); err != nil && !apierrors.IsNotFound(err) {
-			return err
-		}
+	tr.Annotations[sdpv1alpha1.AnnRerunRequested] = "true"
+	tr.Annotations[sdpv1alpha1.AnnRerunOperator] = p.Operator
+	if err := h.Client.Patch(context.Background(), &tr, client.MergeFrom(base)); err != nil {
+		return err
 	}
-
-	// Reset the target TaskRun's status so the TaskRun reconciler rebuilds
-	// its Job/Rollout from scratch.
-	tr.Status.Phase = sdpv1alpha1.TaskRunPending
-	tr.Status.JobRef = ""
-	tr.Status.RolloutRef = ""
-	tr.Status.PodName = ""
-	tr.Status.RetryCount = 0
-	tr.Status.ExitCode = nil
-	tr.Status.StartTime = nil
-	tr.Status.CompletionTime = nil
-	tr.Status.Message = "rerun requested"
-	tr.Status.Approval = nil
-	if err := h.Client.Status().Update(context.Background(), &tr); err != nil && !apierrors.IsNotFound(err) {
+	basePR := pr.DeepCopy()
+	if pr.Annotations == nil {
+		pr.Annotations = map[string]string{}
+	}
+	pr.Annotations[sdpv1alpha1.AnnRerunRequested] = "true"
+	pr.Annotations[sdpv1alpha1.AnnRerunOperator] = p.Operator
+	if err := h.Client.Patch(context.Background(), &pr, client.MergeFrom(basePR)); err != nil {
 		return err
 	}
 
-	// Delete downstream dependents so the DAG recreates them once the target
-	// succeeds again. Cascade GC removes their Jobs/Rollouts.
 	downstream := DownstreamTasks(pr.Spec.Tasks, tr.Spec.TaskName)
 	for _, name := range downstream {
-		dt := &sdpv1alpha1.TaskRun{ObjectMeta: metav1.ObjectMeta{Namespace: tr.Spec.Namespace, Name: pr.Name + "-" + name}}
+		dt := &sdpv1alpha1.TaskRun{ObjectMeta: metav1.ObjectMeta{Name: pr.Name + "-" + name, Namespace: tr.Spec.Namespace}}
 		if err := h.Client.Delete(context.Background(), dt); err != nil && !apierrors.IsNotFound(err) {
-			return err
-		}
-	}
-
-	// Revive the run. The PipelineRun reconciler short-circuits on terminal
-	// phases, so a run left Failed would never re-schedule the TaskRun we just
-	// reset — the rerun would silently do nothing. Only Failed is revived: a
-	// Cancelled run reflects an explicit operator stop and must stay cancelled.
-	if pr.Status.Phase == sdpv1alpha1.PipelineRunFailed {
-		pr.Status.Phase = sdpv1alpha1.PipelineRunRunning
-		pr.Status.CompletionTime = nil
-		pr.Status.Message = "rerun requested"
-		if err := h.Client.Status().Update(context.Background(), &pr); err != nil && !apierrors.IsNotFound(err) {
 			return err
 		}
 	}
@@ -118,7 +92,6 @@ func (h *RerunHandler) Handle(payload json.RawMessage) error {
 // every task that (directly or transitively) depends on taskName, derived
 // from the DependsOn edges in tasks. Pure and unit-tested (C-07).
 func DownstreamTasks(tasks []sdpv1alpha1.PipelineTaskSpec, taskName string) []string {
-	// dependents[task] = tasks that list task in their DependsOn.
 	dependents := map[string][]string{}
 	for _, t := range tasks {
 		for _, dep := range t.DependsOn {

@@ -25,12 +25,15 @@ func TestBuildUpgradeJobSpec(t *testing.T) {
 		KubectlImg:  DefaultKubectlImage,
 		Timeout:     "8m",
 	}
-	ns, job := BuildUpgradeJobSpec(p, opts)
+	ns, job, err := BuildUpgradeJobSpec(p, opts)
+	if err != nil {
+		t.Fatalf("BuildUpgradeJobSpec: %v", err)
+	}
 	if ns != "sdp-workflow" {
 		t.Fatalf("namespace = %q, want sdp-workflow", ns)
 	}
-	// 幂等键 1/2：确定性 Job 名（重派发命中 AlreadyExists 而非堆叠）
-	wantName := "sdp-upgrade-aaaaaaaa"
+	// 幂等键 1/2：Job 名取 sha256(opID) 前 8 位，确定性且不依赖 OpID 长度
+	wantName := "sdp-upgrade-4c0ad025"
 	if job.Name != wantName {
 		t.Errorf("job name = %q, want %q", job.Name, wantName)
 	}
@@ -43,7 +46,7 @@ func TestBuildUpgradeJobSpec(t *testing.T) {
 		t.Errorf("container image = %q, want %q", c.Image, DefaultKubectlImage)
 	}
 	if job.Spec.Template.Spec.ServiceAccountName != "sdp-runner" {
-		t.Errorf("serviceAccount = %q, want sdp-runner", job.Spec.Template.Spec.ServiceAccountName)
+		t.Errorf("serviceAccount = %q, want %q", job.Spec.Template.Spec.ServiceAccountName, "sdp-runner")
 	}
 	// 脚本必须把目标镜像 patch 到本 deployment 并等待 rollout
 	script := strings.Join(c.Command, " ")
@@ -55,6 +58,22 @@ func TestBuildUpgradeJobSpec(t *testing.T) {
 		if !strings.Contains(script, want) {
 			t.Errorf("script missing %q:\n%s", want, script)
 		}
+	}
+}
+
+func TestBuildUpgradeJobSpecShortAndEmptyOpID(t *testing.T) {
+	opts := upgradeOpts{Namespace: "ns", Deployment: "runner", Container: "c", Timeout: "1m"}
+	// Short IDs must not panic on a raw [:8] slice; the hash still gives a
+	// stable 8-character suffix.
+	_, job, err := BuildUpgradeJobSpec(&runnerapi.AgentOpDispatchPayload{OpID: "x", Detail: "v1"}, opts)
+	if err != nil {
+		t.Fatalf("short opID: %v", err)
+	}
+	if !strings.HasPrefix(job.Name, "sdp-upgrade-") || len(job.Name) != len("sdp-upgrade-")+8 {
+		t.Errorf("short opID job name = %q, want a fixed 8-char suffix", job.Name)
+	}
+	if _, _, err := BuildUpgradeJobSpec(&runnerapi.AgentOpDispatchPayload{OpID: "", Detail: "v1"}, opts); err == nil {
+		t.Error("empty opID must be rejected with an error")
 	}
 }
 

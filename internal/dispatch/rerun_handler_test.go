@@ -71,7 +71,10 @@ func newRerunClient(objs ...client.Object) *RerunHandler {
 	return &RerunHandler{Client: b.Build()}
 }
 
-func TestRerunHandlerResetsTargetAndDeletesDownstream(t *testing.T) {
+// The handler stamps intents and deletes downstream TaskRuns. It never writes
+// the target's (or run's) Status — that is the reconcilers' job.
+func TestRerunHandlerStampsIntentsAndDeletesDownstream(t *testing.T) {
+	ctx := context.Background()
 	pr := &sdpv1alpha1.PipelineRun{
 		ObjectMeta: metav1.ObjectMeta{Name: "pr1", Namespace: "ns"},
 		Spec: sdpv1alpha1.PipelineRunSpec{
@@ -105,33 +108,40 @@ func TestRerunHandlerResetsTargetAndDeletesDownstream(t *testing.T) {
 	}
 
 	var gotA sdpv1alpha1.TaskRun
-	if err := h.Client.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "pr1-a"}, &gotA); err != nil {
+	if err := h.Client.Get(ctx, client.ObjectKey{Namespace: "ns", Name: "pr1-a"}, &gotA); err != nil {
 		t.Fatalf("get target: %v", err)
 	}
-	if gotA.Status.Phase != sdpv1alpha1.TaskRunPending {
-		t.Errorf("target should be reset to Pending, got %s", gotA.Status.Phase)
+	if gotA.Annotations[sdpv1alpha1.AnnRerunRequested] != "true" {
+		t.Errorf("target rerun intent missing: %v", gotA.Annotations)
 	}
-	if gotA.Status.JobRef != "" || gotA.Status.RetryCount != 0 {
-		t.Errorf("target JobRef/RetryCount not cleared: jobRef=%q retries=%d", gotA.Status.JobRef, gotA.Status.RetryCount)
+	if gotA.Annotations[sdpv1alpha1.AnnRerunOperator] != "alice" {
+		t.Errorf("operator intent = %q, want alice", gotA.Annotations[sdpv1alpha1.AnnRerunOperator])
+	}
+	if gotA.Status.Phase != sdpv1alpha1.TaskRunFailed {
+		t.Errorf("handler must not write TaskRun status, got %s", gotA.Status.Phase)
 	}
 
 	var gotB sdpv1alpha1.TaskRun
-	err := h.Client.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "pr1-b"}, &gotB)
+	err := h.Client.Get(ctx, client.ObjectKey{Namespace: "ns", Name: "pr1-b"}, &gotB)
 	if !apierrors.IsNotFound(err) {
 		t.Fatalf("downstream TaskRun should be deleted, got err=%v phase=%s", err, gotB.Status.Phase)
 	}
+
+	var gotPR sdpv1alpha1.PipelineRun
+	if err := h.Client.Get(ctx, client.ObjectKey{Namespace: "ns", Name: "pr1"}, &gotPR); err != nil {
+		t.Fatalf("get pr: %v", err)
+	}
+	if gotPR.Annotations[sdpv1alpha1.AnnRerunRequested] != "true" {
+		t.Error("PipelineRun must carry the revive intent")
+	}
 }
 
-func TestRerunHandlerRevivesFailedRun(t *testing.T) {
-	// Without reviving the (terminal) PipelineRun the reconciler short-circuits
-	// and the reset TaskRun is never scheduled — the rerun would silently do
-	// nothing. This was caught by the live E2E run.
+func TestRerunHandlerStampsReviveIntentOnFailedRun(t *testing.T) {
+	ctx := context.Background()
 	pr := &sdpv1alpha1.PipelineRun{
 		ObjectMeta: metav1.ObjectMeta{Name: "pr9", Namespace: "ns"},
-		Spec: sdpv1alpha1.PipelineRunSpec{
-			Tasks: []sdpv1alpha1.PipelineTaskSpec{mkTask("a", "s", "Parallel")},
-		},
-		Status: sdpv1alpha1.PipelineRunStatus{Phase: sdpv1alpha1.PipelineRunFailed},
+		Spec:       sdpv1alpha1.PipelineRunSpec{Tasks: []sdpv1alpha1.PipelineTaskSpec{mkTask("a", "s", "Parallel")}},
+		Status:     sdpv1alpha1.PipelineRunStatus{Phase: sdpv1alpha1.PipelineRunFailed},
 	}
 	trA := &sdpv1alpha1.TaskRun{
 		ObjectMeta: metav1.ObjectMeta{
@@ -141,34 +151,28 @@ func TestRerunHandlerRevivesFailedRun(t *testing.T) {
 		Spec:   sdpv1alpha1.TaskRunSpec{PipelineRunRef: "pr9", TaskName: "a", Namespace: "ns", Type: sdpv1alpha1.TaskTypeBuild},
 		Status: sdpv1alpha1.TaskRunStatus{Phase: sdpv1alpha1.TaskRunFailed, JobRef: "job-a"},
 	}
-
 	h := newRerunClient(pr, trA)
 	payload, _ := json.Marshal(sdpv1alpha1.RerunTaskPayload{PipelineRunName: "pr9", TaskName: "a", Operator: "bob"})
 	if err := h.Handle(payload); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
-
 	var got sdpv1alpha1.PipelineRun
-	if err := h.Client.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "pr9"}, &got); err != nil {
+	if err := h.Client.Get(ctx, client.ObjectKey{Namespace: "ns", Name: "pr9"}, &got); err != nil {
 		t.Fatalf("get pr: %v", err)
 	}
-	if got.Status.Phase != sdpv1alpha1.PipelineRunRunning {
-		t.Errorf("run phase = %s, want Running (revived for rerun)", got.Status.Phase)
+	if got.Status.Phase != sdpv1alpha1.PipelineRunFailed {
+		t.Errorf("handler must not revive status, got %s", got.Status.Phase)
 	}
-	if got.Status.CompletionTime != nil {
-		t.Error("CompletionTime should be cleared when reviving for rerun")
+	if got.Annotations[sdpv1alpha1.AnnRerunOperator] != "bob" {
+		t.Errorf("operator intent = %q, want bob", got.Annotations[sdpv1alpha1.AnnRerunOperator])
 	}
 }
 
-func TestRerunHandlerKeepsCancelledRunCancelled(t *testing.T) {
-	// A cancelled run reflects an explicit operator stop; a rerun must not
-	// silently revive it.
+func TestRerunHandlerKeepsCancelledRunStatus(t *testing.T) {
 	pr := &sdpv1alpha1.PipelineRun{
 		ObjectMeta: metav1.ObjectMeta{Name: "prc", Namespace: "ns"},
-		Spec: sdpv1alpha1.PipelineRunSpec{
-			Tasks: []sdpv1alpha1.PipelineTaskSpec{mkTask("a", "s", "Parallel")},
-		},
-		Status: sdpv1alpha1.PipelineRunStatus{Phase: sdpv1alpha1.PipelineRunCancelled},
+		Spec:       sdpv1alpha1.PipelineRunSpec{Tasks: []sdpv1alpha1.PipelineTaskSpec{mkTask("a", "s", "Parallel")}},
+		Status:     sdpv1alpha1.PipelineRunStatus{Phase: sdpv1alpha1.PipelineRunCancelled},
 	}
 	trA := &sdpv1alpha1.TaskRun{
 		ObjectMeta: metav1.ObjectMeta{
@@ -178,18 +182,16 @@ func TestRerunHandlerKeepsCancelledRunCancelled(t *testing.T) {
 		Spec:   sdpv1alpha1.TaskRunSpec{PipelineRunRef: "prc", TaskName: "a", Namespace: "ns", Type: sdpv1alpha1.TaskTypeBuild},
 		Status: sdpv1alpha1.TaskRunStatus{Phase: sdpv1alpha1.TaskRunFailed, JobRef: "job-a"},
 	}
-
 	h := newRerunClient(pr, trA)
 	payload, _ := json.Marshal(sdpv1alpha1.RerunTaskPayload{PipelineRunName: "prc", TaskName: "a"})
 	if err := h.Handle(payload); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
-
 	var got sdpv1alpha1.PipelineRun
 	if err := h.Client.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "prc"}, &got); err != nil {
 		t.Fatalf("get pr: %v", err)
 	}
 	if got.Status.Phase != sdpv1alpha1.PipelineRunCancelled {
-		t.Errorf("run phase = %s, want Cancelled (must not be revived)", got.Status.Phase)
+		t.Errorf("run phase = %s, want Cancelled (must not be revived by the handler)", got.Status.Phase)
 	}
 }

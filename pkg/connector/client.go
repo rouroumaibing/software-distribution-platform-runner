@@ -21,25 +21,9 @@ import (
 )
 
 // The wire protocol lives in the shared api/v1alpha1 package so the Hub and
-// Runner agree on one message format. We re-export the types/constants here
-// so existing callers (e.g. cmd/runner/main.go) keep compiling unchanged.
-type MessageType = runnerapi.MessageType
-type Message = runnerapi.Message
-
-var (
-	MessageApplyPipelineRun  = runnerapi.MessageApplyPipelineRun
-	MessageApproveTask       = runnerapi.MessageApproveTask
-	MessageRolloutControl    = runnerapi.MessageRolloutControl
-	MessageRerunTask         = runnerapi.MessageRerunTask
-	MessageCancelPipelineRun = runnerapi.MessageCancelPipelineRun
-	MessageAgentOp           = runnerapi.MessageAgentOp
-	MessageStatusUpdate      = runnerapi.MessageStatusUpdate
-	MessageLogChunk          = runnerapi.MessageLogChunk
-	MessageHeartbeat         = runnerapi.MessageHeartbeat
-	MessageAgentOpStatus     = runnerapi.MessageAgentOpStatus
-	MessageAgentOpLog        = runnerapi.MessageAgentOpLog
-	MessageAgentInfo         = runnerapi.MessageAgentInfo
-)
+// Runner agree on one message format. Callers use runnerapi.MessageType and
+// the runnerapi.MessageX constants directly; this package keeps no mirror
+// constants.
 
 // Handler processes an inbound message from the Hub. Registered per
 // MessageType by whatever wires this package up in cmd/runner/main.go —
@@ -82,7 +66,7 @@ type Client struct {
 	agentInfo *runnerapi.AgentInfoPayload
 
 	conn   *websocket.Conn
-	outbox chan Message
+	outbox chan runnerapi.Message
 
 	// dropped counts frames discarded because the outbox was full (see Send).
 	dropped atomic.Uint64
@@ -93,8 +77,8 @@ func New(hubURL, targetName, authToken string) *Client {
 		hubURL:     hubURL,
 		targetName: targetName,
 		authToken:  authToken,
-		handlers:   make(map[MessageType]Handler),
-		outbox:     make(chan Message, 256),
+		handlers:   make(map[runnerapi.MessageType]Handler),
+		outbox:     make(chan runnerapi.Message, 256),
 	}
 }
 
@@ -261,7 +245,7 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 	// reconnect reports the new version as the very first statement this
 	// binary makes.
 	if c.agentInfo != nil {
-		if err := c.Send(MessageAgentInfo, *c.agentInfo); err != nil {
+		if err := c.Send(runnerapi.MessageAgentInfo, *c.agentInfo); err != nil {
 			log.Printf("connector: agent_info send failed: %v", err)
 		}
 	}
@@ -286,7 +270,7 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 		case err := <-readErr:
 			return err
 		case <-heartbeat.C:
-			_ = c.Send(MessageHeartbeat, map[string]string{"target": c.targetName})
+			_ = c.Send(runnerapi.MessageHeartbeat, map[string]string{"target": c.targetName})
 		case msg := <-c.outbox:
 			// A stalled (half-open) connection must surface as an error and
 			// trigger reconnect instead of wedging the pump forever; 10s is

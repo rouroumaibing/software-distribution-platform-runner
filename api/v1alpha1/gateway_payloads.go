@@ -126,6 +126,25 @@ const (
 	AnnCancelOperator = "sdp.io/cancel-operator"
 )
 
+// ApprovalDecisionRecord is one entry of the approval intent carried on a
+// TaskRun annotation. The handler appends to the list; the TaskRun
+// reconciler consumes it into Status.Approval.
+type ApprovalDecisionRecord struct {
+	Approver string `json:"approver"`
+	Rejected bool   `json:"rejected,omitempty"`
+}
+
+// Command-intent annotations. Dispatch handlers only stamp these; the
+// reconcilers consume them and are the sole writers of Status.
+const (
+	// AnnApprovalDecision holds a JSON list of ApprovalDecisionRecord.
+	AnnApprovalDecision = "sdp.io/approval-decision"
+	// AnnRerunRequested marks a rerun command on a TaskRun and on its owning
+	// PipelineRun (the latter revives a Failed run so the DAG can reschedule).
+	AnnRerunRequested = "sdp.io/rerun-requested"
+	AnnRerunOperator  = "sdp.io/rerun-operator"
+)
+
 // Agent op lifecycle states reported via MessageAgentOpStatus. They mirror
 // the hub-side agent_ops ledger (hub internal/target/models): the Runner may
 // move an op forward queued→running→succeeded|failed; terminal states are
@@ -158,7 +177,7 @@ type AgentOpDispatchPayload struct {
 	OpID       string `json:"opID"`
 	TargetID   string `json:"targetID"`
 	EnvID      string `json:"envID,omitempty"`
-	OpType     string `json:"opType"` // exec (install/upgrade dispatch is deferred to the bootstrap flow)
+	OpType     string `json:"opType"` // exec | upgrade (self-upgrade runs as a kubectl Job)
 	Detail     string `json:"detail"`
 	Namespace  string `json:"namespace,omitempty"` // where the op's Job runs; hub supplies the environment namespace
 	Kubeconfig []byte `json:"kubeconfig,omitempty"`

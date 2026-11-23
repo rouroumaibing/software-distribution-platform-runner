@@ -3,7 +3,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.21.0
+    controller-gen.kubebuilder.io/version: v0.22.0
   name: rollouts.pipeline.sdp.io
 spec:
   group: pipeline.sdp.io
@@ -52,7 +52,7 @@ spec:
           spec:
             description: |-
               RolloutSpec defines the desired state of a Rollout.
-              Created by the PipelineRun/TaskRun controller for Deploy-type tasks, or
+              Created by the PipelineRun/TaskRun controller for Release tasks, or
               directly by an operator for a standalone progressive deployment.
             properties:
               autoRollback:
@@ -62,6 +62,24 @@ spec:
                   once HealthCheck.FailureThreshold consecutive checks fail.
                 type: boolean
               canaryImage:
+                type: string
+              desiredAction:
+                description: |-
+                  DesiredAction is the operator's control intent. The dispatch handler
+                  writes it; the reconciler applies it to Status and clears one-shot
+                  commands. Empty means no pending intent (automatic step walk). Pause is
+                  a persistent desired state held until a later Promote/Rollback; Promote
+                  advances one step; Rollback reverts to 0% canary and terminates.
+                enum:
+                - ""
+                - pause
+                - promote
+                - rollback
+                type: string
+              desiredActionOperator:
+                description: |-
+                  DesiredActionOperator records who issued DesiredAction, for the status
+                  message / audit. It is set and cleared with DesiredAction.
                 type: string
               healthCheck:
                 description: HealthCheckSpec defines how canary health is evaluated
@@ -255,6 +273,16 @@ spec:
                 type: string
               message:
                 type: string
+              pauseStartTime:
+                description: PauseStartTime is the entry time recorded for the current
+                  timed pause step.
+                format: date-time
+                type: string
+              pauseStepIndex:
+                description: PauseStepIndex is the step index PauseStartTime belongs
+                  to.
+                format: int32
+                type: integer
               phase:
                 description: RolloutPhase represents the lifecycle phase of a Rollout.
                 enum:

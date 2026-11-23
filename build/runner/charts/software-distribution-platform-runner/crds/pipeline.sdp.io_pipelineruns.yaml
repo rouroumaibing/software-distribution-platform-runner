@@ -3,7 +3,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.21.0
+    controller-gen.kubebuilder.io/version: v0.22.0
   name: pipelineruns.pipeline.sdp.io
 spec:
   group: pipeline.sdp.io
@@ -223,6 +223,24 @@ spec:
                               type: boolean
                             canaryImage:
                               type: string
+                            desiredAction:
+                              description: |-
+                                DesiredAction is the operator's control intent. The dispatch handler
+                                writes it; the reconciler applies it to Status and clears one-shot
+                                commands. Empty means no pending intent (automatic step walk). Pause is
+                                a persistent desired state held until a later Promote/Rollback; Promote
+                                advances one step; Rollback reverts to 0% canary and terminates.
+                              enum:
+                              - ""
+                              - pause
+                              - promote
+                              - rollback
+                              type: string
+                            desiredActionOperator:
+                              description: |-
+                                DesiredActionOperator records who issued DesiredAction, for the status
+                                message / audit. It is set and cleared with DesiredAction.
+                              type: string
                             healthCheck:
                               description: HealthCheckSpec defines how canary health
                                 is evaluated at each step.
@@ -436,6 +454,24 @@ spec:
                           type: boolean
                         canaryImage:
                           type: string
+                        desiredAction:
+                          description: |-
+                            DesiredAction is the operator's control intent. The dispatch handler
+                            writes it; the reconciler applies it to Status and clears one-shot
+                            commands. Empty means no pending intent (automatic step walk). Pause is
+                            a persistent desired state held until a later Promote/Rollback; Promote
+                            advances one step; Rollback reverts to 0% canary and terminates.
+                          enum:
+                          - ""
+                          - pause
+                          - promote
+                          - rollback
+                          type: string
+                        desiredActionOperator:
+                          description: |-
+                            DesiredActionOperator records who issued DesiredAction, for the status
+                            message / audit. It is set and cleared with DesiredAction.
+                          type: string
                         healthCheck:
                           description: HealthCheckSpec defines how canary health is
                             evaluated at each step.
@@ -587,10 +623,13 @@ spec:
                             An optional Canary sub-spec drives a progressive rollout.
                           - Approval: pause the pipeline and wait for an external decision relayed from
                             the hub.
+                          - Test: run a test/verification command as a pod-executed script, judged
+                            by exit code (same execution path as Build).
                       enum:
                       - Build
                       - Release
                       - Approval
+                      - Test
                       type: string
                   required:
                   - name
@@ -762,6 +801,33 @@ spec:
                     retryCount:
                       format: int32
                       type: integer
+                    rollout:
+                      description: |-
+                        Rollout is the live canary snapshot for Release tasks
+                        (RUNNER-REFLUX-SPEC §3): the PipelineRun controller fills it
+                        from the owning Rollout CR's status so the hub can persist
+                        rollout_runs with a real CurrentWeight instead of the console
+                        guessing it from task completion counts. Optional — absent for
+                        non-Release tasks and for old runners (omitempty keeps the wire
+                        format backward compatible).
+                      properties:
+                        currentStepIndex:
+                          type: integer
+                        currentWeight:
+                          type: integer
+                        message:
+                          type: string
+                        phase:
+                          description: RolloutPhase represents the lifecycle phase
+                            of a Rollout.
+                          type: string
+                        workloadRef:
+                          type: string
+                      required:
+                      - currentStepIndex
+                      - currentWeight
+                      - phase
+                      type: object
                     startTime:
                       format: date-time
                       type: string

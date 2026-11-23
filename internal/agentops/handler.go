@@ -334,7 +334,11 @@ func (h *Handler) executeUpgrade(p runnerapi.AgentOpDispatchPayload, report func
 		return
 	}
 
-	_, job := BuildUpgradeJobSpec(&p, h.upgradeOpts(ns))
+	_, job, err := BuildUpgradeJobSpec(&p, h.upgradeOpts(ns))
+	if err != nil {
+		report(runnerapi.AgentOpStatusFailed, fmt.Sprintf("build upgrade job: %v", err))
+		return
+	}
 	created, err := cs.BatchV1().Jobs(ns).Create(ctx, job, metav1.CreateOptions{})
 	if err != nil {
 		report(runnerapi.AgentOpStatusFailed, fmt.Sprintf("create upgrade job: %v", err))
@@ -379,7 +383,11 @@ func orDefault(v, def string) string {
 // BuildUpgradeJobSpec is the pure part of the self-upgrade op: a kubectl Job
 // that patches the runner Deployment to the target version and waits for the
 // rollout. Pure function (no I/O) so the envelope is unit-testable.
-func BuildUpgradeJobSpec(p *runnerapi.AgentOpDispatchPayload, o upgradeOpts) (string, *batchv1.Job) {
+func BuildUpgradeJobSpec(p *runnerapi.AgentOpDispatchPayload, o upgradeOpts) (string, *batchv1.Job, error) {
+	suffix, err := upgradeJobName(p.OpID)
+	if err != nil {
+		return "", nil, err
+	}
 	image := o.NewImage + ":" + p.Detail
 	script := fmt.Sprintf(
 		"kubectl -n %s set image deployment/%s %s=%s && kubectl -n %s rollout status deployment/%s --timeout=%s",
@@ -392,7 +400,7 @@ func BuildUpgradeJobSpec(p *runnerapi.AgentOpDispatchPayload, o upgradeOpts) (st
 			// Deterministic name (not GenerateName): retried dispatches of the
 			// same op hit AlreadyExists instead of stacking Jobs — the second
 			// half of the opID idempotency (the first half is the label probe).
-			Name:      "sdp-upgrade-" + p.OpID[:8],
+			Name:      "sdp-upgrade-" + suffix,
 			Namespace: o.Namespace,
 			Labels: map[string]string{
 				"sdp.io/agent-op": p.OpID,
@@ -415,7 +423,7 @@ func BuildUpgradeJobSpec(p *runnerapi.AgentOpDispatchPayload, o upgradeOpts) (st
 			},
 		},
 	}
-	return o.Namespace, job
+	return o.Namespace, job, nil
 }
 
 // selfNamespace resolves the runner's own namespace: explicit override wins,

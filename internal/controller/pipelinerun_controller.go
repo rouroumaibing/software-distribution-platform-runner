@@ -65,7 +65,7 @@ func (r *PipelineRunReconciler) reportStatus(pr *sdpv1alpha1.PipelineRun) {
 		Tasks:                pr.Status.Tasks,
 	}
 	go func() {
-		if err := r.Conn.Send(connector.MessageStatusUpdate, payload); err != nil {
+		if err := r.Conn.Send(sdpv1alpha1.MessageStatusUpdate, payload); err != nil {
 			log.Printf("pipelinerun: status send failed: %v", err)
 		}
 	}()
@@ -77,9 +77,12 @@ func (r *PipelineRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	// Cancel is consumed here rather than by the dispatch handler so this
-	// reconciler stays the single writer of PipelineRun status: the handler
-	// only stamps an annotation (see applyCancelIfRequested).
+	// Operator commands (rerun, cancel) arrive as intents stamped by the
+	// dispatch handlers; this reconciler consumes them and is the only writer
+	// of PipelineRun status (see applyRerunReviveIntent / applyCancelIfRequested).
+	if done, err := r.applyRerunReviveIntent(ctx, &pr); err != nil || done {
+		return ctrl.Result{}, err
+	}
 	if done, err := r.applyCancelIfRequested(ctx, &pr); err != nil || done {
 		return ctrl.Result{}, err
 	}
@@ -105,7 +108,7 @@ func (r *PipelineRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 
 	// 汇总状态到 PipelineRun.Status.Tasks,供 kubectl / Hub 一次性看到全貌。
-	// Deploy 型任务同时回流 Rollout CR 的灰度快照(RUNNER-REFLUX-SPEC §3),
+	// Release 型任务同时回流 Rollout CR 的灰度快照(RUNNER-REFLUX-SPEC §3),
 	// hub 据此落 rollout_runs,console 步宽调节自此有真实反馈环。
 	var rollouts sdpv1alpha1.RolloutList
 	if err := r.List(ctx, &rollouts, client.InNamespace(pr.Namespace), client.MatchingLabels{
@@ -157,6 +160,33 @@ func (r *PipelineRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 
 	return ctrl.Result{}, r.updateStatus(ctx, &pr)
+}
+
+// applyRerunReviveIntent consumes the rerun intent stamped by the dispatch
+// handler. A Failed run is revived to Running so the reset TaskRun gets
+// rescheduled; a Cancelled run stays cancelled. The handler never writes
+// PipelineRun status — it only stamps this intent.
+func (r *PipelineRunReconciler) applyRerunReviveIntent(ctx context.Context, pr *sdpv1alpha1.PipelineRun) (bool, error) {
+	if pr.Annotations[sdpv1alpha1.AnnRerunRequested] != "true" {
+		return false, nil
+	}
+	operator := pr.Annotations[sdpv1alpha1.AnnRerunOperator]
+	base := pr.DeepCopy()
+	delete(pr.Annotations, sdpv1alpha1.AnnRerunRequested)
+	delete(pr.Annotations, sdpv1alpha1.AnnRerunOperator)
+	if err := r.Patch(ctx, pr, client.MergeFrom(base)); err != nil {
+		return true, err
+	}
+	if pr.Status.Phase != sdpv1alpha1.PipelineRunFailed {
+		return true, nil
+	}
+	pr.Status.Phase = sdpv1alpha1.PipelineRunRunning
+	pr.Status.CompletionTime = nil
+	pr.Status.Message = "rerun requested"
+	if operator != "" {
+		pr.Status.Message = "rerun requested by " + operator
+	}
+	return true, r.updateStatus(ctx, pr)
 }
 
 // --- DAG 推进的核心逻辑,全部是纯函数,方便单测,不直接碰 K8s API ---
@@ -282,7 +312,7 @@ func summarizeTasks(tasks []sdpv1alpha1.PipelineTaskSpec, existing map[string]*s
 }
 
 // rolloutsByName indexes a PipelineRun's Rollout CRs by their owning TaskRun
-// name (label sdp.io/task-run, set at creation in reconcileDeploy).
+// name (label sdp.io/task-run, set at creation in reconcileRollout).
 func rolloutsByName(list sdpv1alpha1.RolloutList) map[string]*sdpv1alpha1.Rollout {
 	out := make(map[string]*sdpv1alpha1.Rollout, len(list.Items))
 	for i := range list.Items {
@@ -293,7 +323,7 @@ func rolloutsByName(list sdpv1alpha1.RolloutList) map[string]*sdpv1alpha1.Rollou
 }
 
 // rolloutSummaryFor projects the owning Rollout CR's status into the reflux
-// snapshot (RUNNER-REFLUX-SPEC §3). nil for non-deploy tasks or when the CR
+// snapshot (RUNNER-REFLUX-SPEC §3). nil for non-Release tasks or when the CR
 // hasn't been created yet — the omitempty keeps those frames unchanged.
 func rolloutSummaryFor(tr *sdpv1alpha1.TaskRun, rollouts map[string]*sdpv1alpha1.Rollout) *sdpv1alpha1.RolloutStatusSummary {
 	if tr.Status.RolloutRef == "" {
@@ -379,7 +409,7 @@ var skipNameValidation = true
 // back to the Hub. connector.Client satisfies it; a test double can capture
 // payloads without a live WebSocket.
 type statusSender interface {
-	Send(t connector.MessageType, payload any) error
+	Send(t sdpv1alpha1.MessageType, payload any) error
 }
 
 // ResyncAll re-asserts this Runner's local state with the Hub after a
@@ -408,7 +438,7 @@ func ResyncAll(ctx context.Context, c client.Client, sender statusSender, target
 			CompletionTime:       pr.Status.CompletionTime,
 			Tasks:                pr.Status.Tasks,
 		}
-		if err := sender.Send(connector.MessageStatusUpdate, payload); err != nil {
+		if err := sender.Send(sdpv1alpha1.MessageStatusUpdate, payload); err != nil {
 			log.Printf("pipelinerun: resync send failed for %s/%s: %v", pr.Namespace, pr.Name, err)
 		}
 	}

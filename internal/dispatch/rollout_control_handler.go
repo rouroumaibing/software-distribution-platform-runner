@@ -11,23 +11,15 @@ import (
 	sdpv1alpha1 "github.com/rouroumaibing/software-distribution-platform-runner/api/v1alpha1"
 )
 
-// Rollout control annotations — must match the keys the RolloutReconciler
-// consumes (kept in sync by hand; both live in this repo's runner module).
-const (
-	annRolloutAction = "sdp.io/rollout-action"
-	annRolloutOper   = "sdp.io/rollout-operator"
-)
-
-// RolloutControlHandler receives MessageRolloutControl frames and stamps the
-// operator command onto the matching Rollout CR as an annotation. The
-// RolloutReconciler observes the annotation, applies pause/promote/rollback
-// to Status, and clears it — so all Rollout writes stay inside the
-// reconciler (the handler never touches Status directly).
+// RolloutControlHandler receives MessageRolloutControl frames and writes the
+// operator command to Rollout.Spec.DesiredAction. The RolloutReconciler is
+// the only writer of Rollout status: it consumes the intent, applies it to
+// Status and clears one-shot commands.
 type RolloutControlHandler struct {
 	Client client.Client
 }
 
-// Handle finds the Release task's Rollout and stamps the control command.
+// Handle finds the Release task's Rollout and records the control intent.
 func (h *RolloutControlHandler) Handle(payload json.RawMessage) error {
 	var p sdpv1alpha1.RolloutControlPayload
 	if err := json.Unmarshal(payload, &p); err != nil {
@@ -67,19 +59,15 @@ func (h *RolloutControlHandler) Handle(payload json.RawMessage) error {
 		return err
 	}
 
-	// Stamp the one-shot command; the reconciler consumes and clears it.
+	// The Spec field is the single write path for control intent. Legacy
+	// annotations are read by the reconciler for compatibility only.
 	base := ro.DeepCopy()
-	if ro.Annotations == nil {
-		ro.Annotations = map[string]string{}
-	}
-	ro.Annotations[annRolloutAction] = string(p.Action)
-	if p.Operator != "" {
-		ro.Annotations[annRolloutOper] = p.Operator
-	}
+	ro.Spec.DesiredAction = p.Action
+	ro.Spec.DesiredActionOperator = p.Operator
 	if err := h.Client.Patch(context.Background(), &ro, client.MergeFrom(base)); err != nil {
 		return err
 	}
-	log.Printf("dispatch: rollout control %s stamped on %s/%s by %s",
+	log.Printf("dispatch: rollout control %s written on %s/%s by %s",
 		p.Action, ro.Namespace, ro.Name, p.Operator)
 	return nil
 }

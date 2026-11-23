@@ -12,7 +12,7 @@ import (
 // pile up goroutines on the channel send. See features/connector-backpressure.md.
 func TestSend_DropsWhenOutboxFull(t *testing.T) {
 	c := New("ws://127.0.0.1:1/nope", "target-a", "token")
-	c.outbox = make(chan Message, 2)
+	c.outbox = make(chan runnerapi.Message, 2)
 
 	fill := map[string]string{"t": "x"}
 	for i := 0; i < 2; i++ {
@@ -56,7 +56,7 @@ func TestSend_DropsWhenOutboxFull(t *testing.T) {
 // capacity or bump the drop counter.
 func TestSend_MarshalError(t *testing.T) {
 	c := New("ws://127.0.0.1:1/nope", "target-a", "token")
-	c.outbox = make(chan Message, 1)
+	c.outbox = make(chan runnerapi.Message, 1)
 
 	if err := c.Send(runnerapi.MessageHeartbeat, make(chan int)); err == nil {
 		t.Fatal("expected marshal error for unsupportable payload, got nil")

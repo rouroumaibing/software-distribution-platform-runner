@@ -160,8 +160,8 @@ func (b *JobBuilder) Build(tr *sdpv1alpha1.TaskRun) *batchv1.Job {
 
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
-			// Job 名字带上 TaskRun 名 + 一个短随机后缀由 controller-runtime 的
-			// GenerateName 机制处理更合适,这里先用固定命名占位。
+			// Job 名固定为 taskrun-<TaskRun 名>:同一 TaskRun 重建 Job 时命中
+			// AlreadyExists,重派发不会堆叠 Job。
 			Name:      "taskrun-" + tr.Name,
 			Namespace: tr.Spec.Namespace,
 			Labels: map[string]string{
@@ -262,13 +262,8 @@ func (b *JobBuilder) consumeContainer(consumes []string, params []sdpv1alpha1.Pa
 	// Params can feed the download script too (e.g. ${KEY} already resolved
 	// hub-side; plain $VERSION still works here).
 	env = append(env, paramsToEnv(params)...)
-	env = append(env, corev1.EnvVar{
-		Name:  "AUTH_HEADER",
-		Value: "",
-	})
-	if b.HubAPIToken != "" {
-		env[len(env)-1] = corev1.EnvVar{Name: "AUTH_HEADER", Value: "-H \"Authorization: Bearer $SDP_HUB_TOKEN\""}
-	}
+	// The fetch script uses $SDP_HUB_TOKEN directly; no AUTH_HEADER env is
+	// consumed, so only the token is injected when one is configured.
 	return corev1.Container{
 		Name:    "fetch-artifacts",
 		Image:   b.ArtifactImage,
