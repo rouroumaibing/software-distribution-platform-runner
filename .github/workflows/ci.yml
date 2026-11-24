@@ -2,7 +2,7 @@ name: ci
 
 # L0 验证层 —— 纯检查、零产物、不触发发布。
 # 触发: push main + 任意 PR；文档/设计类改动不排队。
-# 命令: gofmt 格式检查 -> go vet ./... -> go build ./... -> go test ./...
+# 命令: gofmt 格式检查 -> go vet ./... -> go build ./... -> go test ./... -> make check-crds
 # runner 不依赖其他同仓，单 checkout。
 
 on:
@@ -41,3 +41,6 @@ jobs:
 
       - name: Test
         run: go test ./...
+
+      - name: CRD chart copy in sync
+        run: make check-crds

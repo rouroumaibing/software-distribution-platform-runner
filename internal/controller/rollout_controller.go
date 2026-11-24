@@ -60,6 +60,30 @@ type RolloutReconciler struct {
 	client.Client
 }
 
+// commitStatus writes only the Status subresource through a freshly-read copy.
+// Spec and metadata Patches mutate the server copy and bump resourceVersion;
+// writing Status through the stale in-memory object would conflict. A fresh
+// read keeps the write on the latest version and keeps Status independent of
+// any Spec write in the same reconcile.
+func (r *RolloutReconciler) commitStatus(ctx context.Context, ro *sdpv1alpha1.Rollout) error {
+	var fresh sdpv1alpha1.Rollout
+	if err := r.Get(ctx, client.ObjectKey{Namespace: ro.Namespace, Name: ro.Name}, &fresh); err != nil {
+		return err
+	}
+	fresh.Status = *ro.Status.DeepCopy()
+	return r.Status().Update(ctx, &fresh)
+}
+
+// patchRollout mutates Spec/metadata on a deep copy so the API response cannot
+// overwrite in-memory Status fields. Status is observation and is written only
+// through commitStatus. Callers must not rely on ro reflecting a Spec mutation
+// after this call; the next reconcile re-reads it from the server.
+func (r *RolloutReconciler) patchRollout(ctx context.Context, ro *sdpv1alpha1.Rollout, mutate func(*sdpv1alpha1.Rollout)) error {
+	patch := ro.DeepCopy()
+	mutate(patch)
+	return r.Patch(ctx, patch, client.MergeFrom(ro))
+}
+
 func (r *RolloutReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	var ro sdpv1alpha1.Rollout
 	if err := r.Get(ctx, req.NamespacedName, &ro); err != nil {
@@ -104,7 +128,7 @@ func (r *RolloutReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			ro.Status.CompletionTime = &now
 		}
 		clearPauseTiming(&ro)
-		return ctrl.Result{}, r.Status().Update(ctx, &ro)
+		return ctrl.Result{}, r.commitStatus(ctx, &ro)
 	}
 
 	// Paused hold: a persistent Pause intent (or the legacy annotation) keeps
@@ -124,7 +148,7 @@ func (r *RolloutReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		}, canaryDep, total)
 		ro.Status.Phase = sdpv1alpha1.RolloutPaused
 		ro.Status.Message = "paused by operator"
-		return ctrl.Result{RequeueAfter: healthCheckInterval}, r.Status().Update(ctx, &ro)
+		return ctrl.Result{RequeueAfter: healthCheckInterval}, r.commitStatus(ctx, &ro)
 	}
 
 	// Terminal hold (decision #7): Failed / RolledBack are end states. A
@@ -152,13 +176,13 @@ func (r *RolloutReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 				ro.Status.PauseStartTime = &now
 				ro.Status.PauseStepIndex = ro.Status.CurrentStepIndex
 			}
-			if err := r.Status().Update(ctx, &ro); err != nil {
+			if err := r.commitStatus(ctx, &ro); err != nil {
 				return ctrl.Result{}, err
 			}
 			if migrated {
-				base := ro.DeepCopy()
-				delete(ro.Annotations, canary.PauseStartAnnotation)
-				if err := r.Patch(ctx, &ro, client.MergeFrom(base)); err != nil {
+				if err := r.patchRollout(ctx, &ro, func(p *sdpv1alpha1.Rollout) {
+					delete(p.Annotations, canary.PauseStartAnnotation)
+				}); err != nil {
 					return ctrl.Result{}, err
 				}
 			}
@@ -200,7 +224,7 @@ func (r *RolloutReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		ro.Status.CompletionTime = &now
 		clearPauseTiming(&ro)
 		metrics.Alert("rollout", ro.Name, "canary replica failure")
-		if err := r.Status().Update(ctx, &ro); err != nil {
+		if err := r.commitStatus(ctx, &ro); err != nil {
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{}, nil
@@ -233,7 +257,7 @@ func (r *RolloutReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		metrics.Alert("rollout", ro.Name, decision.Message)
 	}
 
-	if err := r.Status().Update(ctx, &ro); err != nil {
+	if err := r.commitStatus(ctx, &ro); err != nil {
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{RequeueAfter: decision.RequeueAfter}, nil
@@ -448,8 +472,9 @@ func resolveServiceTargetPort(stable *appsv1.Deployment, envPort int32) int32 {
 // currentStep returns the step the status is currently walking, or nil when
 // all steps are consumed.
 func currentStep(ro *sdpv1alpha1.Rollout) *sdpv1alpha1.CanaryStep {
-	if int(ro.Status.CurrentStepIndex) < len(ro.Spec.Steps) {
-		return &ro.Spec.Steps[ro.Status.CurrentStepIndex]
+	idx := int(ro.Status.CurrentStepIndex)
+	if idx >= 0 && idx < len(ro.Spec.Steps) {
+		return &ro.Spec.Steps[idx]
 	}
 	return nil
 }
@@ -598,10 +623,10 @@ func (r *RolloutReconciler) applyDesiredAction(ctx context.Context, ro *sdpv1alp
 	legacyAction := ro.Annotations[sdpv1alpha1.AnnRolloutAction]
 	legacyOperator := ro.Annotations[sdpv1alpha1.AnnRolloutOperator]
 	if legacyAction != "" {
-		base := ro.DeepCopy()
-		delete(ro.Annotations, sdpv1alpha1.AnnRolloutAction)
-		delete(ro.Annotations, sdpv1alpha1.AnnRolloutOperator)
-		if err := r.Patch(ctx, ro, client.MergeFrom(base)); err != nil {
+		if err := r.patchRollout(ctx, ro, func(p *sdpv1alpha1.Rollout) {
+			delete(p.Annotations, sdpv1alpha1.AnnRolloutAction)
+			delete(p.Annotations, sdpv1alpha1.AnnRolloutOperator)
+		}); err != nil {
 			return true, err
 		}
 		if !specDriven {
@@ -626,21 +651,23 @@ func (r *RolloutReconciler) applyDesiredAction(ctx context.Context, ro *sdpv1alp
 			return false, nil // already applied; the hold branch owns it
 		}
 		if ro.Status.Phase == sdpv1alpha1.RolloutHealthy || ro.Status.Phase == sdpv1alpha1.RolloutDegraded {
-			ro.Status.Message = "pause ignored: rollout already " + string(ro.Status.Phase)
+			// clearDesiredAction patches Spec; the API response replaces ro with the
+			// server's current Status, so set the message only after that write.
 			if specDriven {
 				if err := r.clearDesiredAction(ctx, ro); err != nil {
 					return true, err
 				}
 			}
+			ro.Status.Message = "pause ignored: rollout already " + string(ro.Status.Phase)
 			break
 		}
 		if !specDriven {
 			// Compatibility migration: record the consumed legacy command
 			// as the Spec intent. Legacy annotations stay read-only here.
-			base := ro.DeepCopy()
-			ro.Spec.DesiredAction = sdpv1alpha1.RolloutActionPause
-			ro.Spec.DesiredActionOperator = operator
-			if err := r.Patch(ctx, ro, client.MergeFrom(base)); err != nil {
+			if err := r.patchRollout(ctx, ro, func(p *sdpv1alpha1.Rollout) {
+				p.Spec.DesiredAction = sdpv1alpha1.RolloutActionPause
+				p.Spec.DesiredActionOperator = operator
+			}); err != nil {
 				return true, err
 			}
 		}
@@ -660,9 +687,9 @@ func (r *RolloutReconciler) applyDesiredAction(ctx context.Context, ro *sdpv1alp
 		}
 		// Drop the legacy paused flag so the hold branch doesn't re-engage.
 		if ro.Annotations[sdpv1alpha1.AnnRolloutPaused] == "true" {
-			base := ro.DeepCopy()
-			delete(ro.Annotations, sdpv1alpha1.AnnRolloutPaused)
-			if err := r.Patch(ctx, ro, client.MergeFrom(base)); err != nil {
+			if err := r.patchRollout(ctx, ro, func(p *sdpv1alpha1.Rollout) {
+				delete(p.Annotations, sdpv1alpha1.AnnRolloutPaused)
+			}); err != nil {
 				return true, err
 			}
 		}
@@ -716,15 +743,17 @@ func (r *RolloutReconciler) applyDesiredAction(ctx context.Context, ro *sdpv1alp
 		}
 		ro.Status.Message = "rolled back" + by
 	default:
-		ro.Status.Message = "ignored unknown rollout action " + string(intent)
+		// clearDesiredAction patches Spec and replaces ro with the server's Status;
+		// set the message after that write so it is not overwritten.
 		if specDriven {
 			if err := r.clearDesiredAction(ctx, ro); err != nil {
 				return true, err
 			}
 		}
+		ro.Status.Message = "ignored unknown rollout action " + string(intent)
 	}
 
-	if err := r.Status().Update(ctx, ro); err != nil {
+	if err := r.commitStatus(ctx, ro); err != nil {
 		return true, err
 	}
 	return true, nil
@@ -736,10 +765,10 @@ func (r *RolloutReconciler) clearDesiredAction(ctx context.Context, ro *sdpv1alp
 	if ro.Spec.DesiredAction == "" && ro.Spec.DesiredActionOperator == "" {
 		return nil
 	}
-	base := ro.DeepCopy()
-	ro.Spec.DesiredAction = ""
-	ro.Spec.DesiredActionOperator = ""
-	return r.Patch(ctx, ro, client.MergeFrom(base))
+	return r.patchRollout(ctx, ro, func(p *sdpv1alpha1.Rollout) {
+		p.Spec.DesiredAction = ""
+		p.Spec.DesiredActionOperator = ""
+	})
 }
 
 func weightReplicas(weight, total int32) int32 {

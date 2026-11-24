@@ -60,6 +60,16 @@ func TestApproverHandlerStampsIntentOnly(t *testing.T) {
 	if len(decisions) != 2 {
 		t.Errorf("decisions = %v, want two distinct approvers", decisions)
 	}
+	// Assert the exact identities, not just the count. A `== -> !=` mutation
+	// on the idempotency check would still land on two records (alice twice,
+	// bob skipped) and slip past a count-only assertion.
+	approvers := map[string]bool{}
+	for _, d := range decisions {
+		approvers[d.Approver] = true
+	}
+	if !approvers["alice"] || !approvers["bob"] {
+		t.Errorf("decisions = %v, want both alice and bob", decisions)
+	}
 	if got.Status.Approval != nil || got.Status.Phase != sdpv1alpha1.TaskRunPending {
 		t.Errorf("handler must not write status: approval=%v phase=%s", got.Status.Approval, got.Status.Phase)
 	}
