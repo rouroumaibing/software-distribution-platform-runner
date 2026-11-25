@@ -65,10 +65,10 @@ selfUpgrade:
 
 # canary 发布：<workload>-sdp 流量服务的 targetPort。缺省自动取 stable workload
 # 已声明的第一个容器端口，无声明时兜底 8080；显式设置即强制覆盖（端口冲突环境用）。
-  rollout:
-    serviceTargetPort: ""
-    # 私有 registry 拉取凭据名（如 CCE 预置的 default-secret）。设置后注入到
-    # canary/stable Deployment 的 Pod spec imagePullSecrets；运行命名空间由 runner
-    # 动态创建，default SA 无法在部署期预置，故凭据必须在 Pod spec 显式声明。
-    # 留空 = 公开 registry，不注入。
-    imagePullSecret: ""
+rollout:
+  serviceTargetPort: ""
+  # 私有 registry 拉取凭据名（如 CCE 预置的 default-secret）。设置后注入到
+  # canary/stable Deployment 的 Pod spec imagePullSecrets；运行命名空间由 runner
+  # 动态创建，default SA 无法在部署期预置，故凭据必须在 Pod spec 显式声明。
+  # 留空 = 公开 registry，不注入。
+  imagePullSecret: ""
