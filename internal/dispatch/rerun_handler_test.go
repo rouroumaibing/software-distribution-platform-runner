@@ -107,18 +107,11 @@ func TestRerunHandlerStampsIntentsAndDeletesDownstream(t *testing.T) {
 		t.Fatalf("Handle returned error: %v", err)
 	}
 
+	// The target TaskRun must be deleted (delete+recreate rerun), not patched
+	// with a two-phase intent that can be lost on a Status-update conflict.
 	var gotA sdpv1alpha1.TaskRun
-	if err := h.Client.Get(ctx, client.ObjectKey{Namespace: "ns", Name: "pr1-a"}, &gotA); err != nil {
-		t.Fatalf("get target: %v", err)
-	}
-	if gotA.Annotations[sdpv1alpha1.AnnRerunRequested] != "true" {
-		t.Errorf("target rerun intent missing: %v", gotA.Annotations)
-	}
-	if gotA.Annotations[sdpv1alpha1.AnnRerunOperator] != "alice" {
-		t.Errorf("operator intent = %q, want alice", gotA.Annotations[sdpv1alpha1.AnnRerunOperator])
-	}
-	if gotA.Status.Phase != sdpv1alpha1.TaskRunFailed {
-		t.Errorf("handler must not write TaskRun status, got %s", gotA.Status.Phase)
+	if err := h.Client.Get(ctx, client.ObjectKey{Namespace: "ns", Name: "pr1-a"}, &gotA); !apierrors.IsNotFound(err) {
+		t.Fatalf("target TaskRun should be deleted, got err=%v", err)
 	}
 
 	var gotB sdpv1alpha1.TaskRun

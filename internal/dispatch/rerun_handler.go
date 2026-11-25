@@ -54,17 +54,18 @@ func (h *RerunHandler) Handle(payload json.RawMessage) error {
 		return err
 	}
 
-	// Two intents: the TaskRun resets its own status/rebuilds its work; the
-	// PipelineRun revives a Failed run so the reset task is rescheduled.
-	base := tr.DeepCopy()
-	if tr.Annotations == nil {
-		tr.Annotations = map[string]string{}
-	}
-	tr.Annotations[sdpv1alpha1.AnnRerunRequested] = "true"
-	tr.Annotations[sdpv1alpha1.AnnRerunOperator] = p.Operator
-	if err := h.Client.Patch(context.Background(), &tr, client.MergeFrom(base)); err != nil {
+	// Delete the target TaskRun instead of stamping a reset intent. Re-running
+	// is a delete+recreate: the PipelineRun DAG reconciler sees no TaskRun for
+	// this task and rebuilds it, while Job/Rollout are GC'd via ownerRef. A
+	// two-phase intent (patch annotations, then reset Status in another API
+	// write) loses the rerun forever if the Status update conflicts after the
+	// annotation patch landed — deleting is a single atomic write with no such
+	// window, and keeps hasFailedTask false so a revived run cannot fall back
+	// to Failed before the replacement TaskRun reports in.
+	if err := h.Client.Delete(context.Background(), &tr, client.PropagationPolicy(metav1.DeletePropagationBackground)); err != nil && !apierrors.IsNotFound(err) {
 		return err
 	}
+
 	basePR := pr.DeepCopy()
 	if pr.Annotations == nil {
 		pr.Annotations = map[string]string{}

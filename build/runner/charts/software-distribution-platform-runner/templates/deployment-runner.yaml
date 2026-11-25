@@ -88,6 +88,11 @@ spec:
             - name: SDP_ROLLOUT_SVC_TARGET_PORT
               value: {{ .Values.rollout.serviceTargetPort | quote }}
 {{- end }}
+{{- if .Values.rollout.imagePullSecret }}
+            # 私有 registry：canary/stable Deployment 的 Pod 拉取凭据（运行命名空间动态创建，无法靠预置 default SA）
+            - name: SDP_ROLLOUT_IMAGE_PULL_SECRET
+              value: {{ .Values.rollout.imagePullSecret | quote }}
+{{- end }}
           image: {{ .Values.image.imageAddr }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           {{- if .Values.hub.caSecretName }}

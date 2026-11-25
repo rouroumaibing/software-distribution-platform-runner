@@ -14,6 +14,7 @@ import (
 	"log"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -340,9 +341,8 @@ func (r *RolloutReconciler) buildStable(ro *sdpv1alpha1.Rollout, replicas int32)
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{appLabel: ro.Spec.WorkloadRef}},
 				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{
-						{Name: "app", Image: ro.Spec.StableImage},
-					},
+					Containers:       []corev1.Container{{Name: "app", Image: ro.Spec.StableImage}},
+					ImagePullSecrets: rolloutPullSecrets(),
 				},
 			},
 		},
@@ -376,9 +376,8 @@ func (r *RolloutReconciler) ensureCanary(ctx context.Context, ro *sdpv1alpha1.Ro
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{appLabel: ro.Spec.WorkloadRef}},
 				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{
-						{Name: "app", Image: ro.Spec.CanaryImage},
-					},
+					Containers:       []corev1.Container{{Name: "app", Image: ro.Spec.CanaryImage}},
+					ImagePullSecrets: rolloutPullSecrets(),
 				},
 			},
 		},
@@ -448,6 +447,26 @@ func rolloutSvcTargetPortEnv() int32 {
 		return 0
 	}
 	return int32(n)
+}
+
+// rolloutImagePullSecretEnv reads the optional SDP_ROLLOUT_IMAGE_PULL_SECRET
+// (chart values rollout.imagePullSecret). Private registries (e.g. SWR, a
+// hardened harbor) reject anonymous pulls; the generated stable/canary
+// Deployments must carry the pull secret in their Pod spec, not rely on the
+// target namespace's default ServiceAccount being patched after creation —
+// the run namespace is created dynamically by the runner itself. Empty means
+// no credentials (public registry), preserving the previous behavior.
+func rolloutImagePullSecretEnv() string {
+	return strings.TrimSpace(os.Getenv("SDP_ROLLOUT_IMAGE_PULL_SECRET"))
+}
+
+// rolloutPullSecrets returns the PodSpec imagePullSecrets for generated
+// canary workloads: one entry when a secret is configured, nil otherwise.
+func rolloutPullSecrets() []corev1.LocalObjectReference {
+	if name := rolloutImagePullSecretEnv(); name != "" {
+		return []corev1.LocalObjectReference{{Name: name}}
+	}
+	return nil
 }
 
 // resolveServiceTargetPort decides the <workload>-sdp Service targetPort:
