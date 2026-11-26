@@ -222,6 +222,11 @@ func main() {
 	// restarted when the manager fails (D-01).
 	go conn.Run(ctx)
 
+	// HTTP pull-claim 轮询（coordination-design §2.6 目标态）：WS 推送之外的
+	// 兜底拉取轨，投递占坑在 hub 侧原子完成，两轨不会重复下发同一 job。
+	// SDP_CLAIM_INTERVAL=0 关闭。
+	go conn.RunClaimPoller(ctx, envDurationOr("SDP_CLAIM_INTERVAL", 30*time.Second))
+
 	log.Printf("runner for target %q starting", targetName)
 
 	// D-01: resilient manager start. A transient cache-sync timeout (e.g.
